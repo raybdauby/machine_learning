@@ -1,0 +1,194 @@
+---
+title: "DA5030 Forecasting"
+author: "Ray Dauby"
+date: "09-22-24"
+output:
+  html_document:
+    df_print: paged
+---
+```{r LoadPackages, include = FALSE}
+# Install and load sqldf if not already installed
+if (!require(sqldf)) {
+  install.packages("sqldf")
+}
+library(sqldf)
+
+# Install and load TTR if not already installed
+if (!require(TTR)) {
+  install.packages("TTR")
+}
+library(TTR)
+```
+
+```{r Question2, echo = TRUE}
+## Question 2
+
+# URL of the CSV file
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/financial_portfolio_data.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(url, stringsAsFactors = FALSE)
+
+# Show the first five rows of df
+head(df, 5)
+```
+
+```{r Question3, echo = TRUE}
+## Question 3
+
+# Convert Date column from chr to Date
+df$Date <- as.Date(df$Date)
+
+# Show the updated first five rows of df
+head(df, 5)
+```
+
+```{r Question4, echo = TRUE}
+## Question 4
+
+# Extract rows with Bond B
+bond_b_rows <- which(df$Asset == "Bond B")
+df.B <- df[bond_b_rows, ]
+
+# Sort the subset by Date in ascending order
+df.B <- df.B[order(df.B$Date), ]
+
+# Show the least recent data
+head (df.B, 5)
+```
+
+```{r Question5, echo = TRUE}
+## Question 5
+
+# Add a new Month column to df.B
+df.B$Month <- as.numeric(format(df.B$Date, "%m"))
+
+# Show numeric Month column in df.B
+head(df.B, 5)
+```
+
+```{r Question6, echo = TRUE}
+## Question 6
+
+# Calculate the monthly average price of Bond B transactions
+df.Monthly <- sqldf("SELECT Month, AVG(Price) AS `AvgPrice`
+                     FROM `df.B`
+                     GROUP BY Month
+                     ORDER BY Month")
+
+# Show averaged Bond B prices per month in a table
+head(df.Monthly, 5)
+```
+
+```{r Question7, echo = TRUE}
+## Question 7
+
+# Create a vector for the months (1-12)
+months_numeric <- 1:12
+
+# Create a vector for the average prices
+avg_prices <- df.Monthly$AvgPrice
+
+# Plot the monthly average price with month labels
+plot(months_numeric, avg_prices, 
+     type = "o",
+     col = "darkorange",
+     xlab = "Month (1-12)",
+     ylab = "Average Price ($)",
+     main = "Monthly Average Price of Bond B",
+     pch = 19)
+
+# Set x-axis labels
+axis(1, at = months_numeric, labels = months_numeric)
+```
+
+```{r Question8, echo = TRUE}
+## Question 8
+
+# Define the weights for the WMA 
+weights <- c(0.2, 0.3, 0.5)
+
+# Calculate the Weighted Moving Average
+wma <- TTR::WMA(avg_prices, n = length(weights), wts = weights)
+
+# Forecast using the last value of WMA
+forecast.val <- tail(wma, 1)
+
+# Show the forecasted value for the next month
+print(forecast.val)
+```
+
+```{r Question9, echo = TRUE}
+## Question 9
+
+# Define the weights for the WMA (3-period example)
+w <- c(0.2, 0.3, 0.5)
+
+# Calculate forecast for each prior time period
+df.Monthly$WMA <- TTR::WMA(avg_prices, 
+                                 n = 3, 
+                                 weights = w)
+
+periods <- nrow(df.Monthly)
+
+# Calculate the absolute errors
+for (t in 3:periods) {
+  df.Monthly$abs.err[t] <- abs(df.Monthly$WMA[t-1] - df.Monthly$WMA[t])
+}
+
+# Calculate mean of absolute errors (MAE)
+MAE.WMA <- mean(df.Monthly$abs.err, na.rm = TRUE)
+
+# Show MAE and forecasts with absolute error
+print(MAE.WMA)
+print(df.Monthly)
+```
+
+```{r Question10, echo = TRUE}
+## Question 10
+
+# Assign quarters based on the month
+# Assumed that the instructions were incorrectly categorizing months into trimesters instead of quarters
+df.Monthly$Quarter <- ifelse(df.Monthly$Month %in% 1:3, "Q1",
+                              ifelse(df.Monthly$Month %in% 4:6, "Q2",
+                                     ifelse(df.Monthly$Month %in% 7:9, "Q3", "Q4")))
+
+# Dummy-coded columns
+df.Monthly$Q1 <- ifelse(df.Monthly$Quarter == "Q1", 1, 0)
+df.Monthly$Q2 <- ifelse(df.Monthly$Quarter == "Q2", 1, 0)
+df.Monthly$Q3 <- ifelse(df.Monthly$Quarter == "Q3", 1, 0)
+# Q4 is not any of the previous three quarters
+
+# Additive seasonality, adjusted linear regression trend forecasting model
+trend.model.adjusted <- lm(
+  df.Monthly$AvgPrice ~ df.Monthly$Month + 
+    df.Monthly$Q1 +
+    df.Monthly$Q2 +
+    df.Monthly$Q3
+)
+
+# Print the trend model sumamry
+summary(trend.model.adjusted)
+
+# Print the updated data frame
+print(df.Monthly)
+
+```
+
+```{r Question11, echo = TRUE}
+## Question 11
+
+# Pull values from adjusted trend model
+b <- trend.model.adjusted$coefficients[[1]]   # intercept
+t <- trend.model.adjusted$coefficients[[2]]   # time period coefficient
+Q1 <- trend.model.adjusted$coefficients[[3]]  # Q1 coefficient
+Q2 <- trend.model.adjusted$coefficients[[4]]  # Q2 coefficient
+Q3 <- trend.model.adjusted$coefficients[[5]]  # Q3 coefficient
+
+# Next month prediction (January = month 13 = Q1)
+F.13 <- (t * 13) + b + (Q1*1) + (Q2*0) + (Q3*0) 
+
+# Show Month 13 predicted value
+print(F.13)
+```
+
