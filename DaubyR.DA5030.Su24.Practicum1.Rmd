@@ -1,0 +1,676 @@
+---
+title: 'BUILD: Practicum 1'
+author: "Dauby, Ray"
+date: "09-30-24"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+## 1 / Predicting Life Expectancy
+
+```{r Packages, include = F}
+# List of packages to install and load
+# asked chatgpt for help making my code more efficient for downloading packages, was doing them one at a time before
+packages <- c("dplyr", "tidyr", "ggplot2", "caret", "knitr", "kableExtra", "class", "pander")
+
+# Install packages (if not already installed)
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if (length(new_packages) > 0) {
+  install.packages(new_packages)
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+```
+
+```{r ExploreData, include = F}
+# Problem 1
+
+# URL of the CSV file
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/LifeExpectancyData.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(url, stringsAsFactors = FALSE, header = T)
+
+# Show the first five rows of df
+head(df, 5)
+
+# Data Summary
+pander(summary(df), caption = "Life Expectancy Data")
+```
+
+### 1.1 / Analysis of Per Capita Mortality
+
+```{r MortalityPlot, echo = F}
+# Problem 2
+
+# Calculate total mortality and per-capita mortality
+df.mortality <- df %>%
+  filter(!is.na(Adult.Mortality) & !is.na(infant.deaths) & !is.na(Population)) %>%
+  mutate(
+    Total.Mortality = (Adult.Mortality / 1000) * Population + (infant.deaths / 1000) * Population,
+    PerCapitaMortality = (Total.Mortality / Population) * 1000
+  )
+
+# Calculate average per-capita mortality by Status
+avg_mortality <- df.mortality %>%
+  group_by(Status) %>%
+  summarise(Average.PerCapitaMortality = mean(PerCapitaMortality, na.rm = TRUE))
+
+# Statistics for summary
+developed_avg <- round(avg_mortality$Average.PerCapitaMortality[avg_mortality$Status == "Developed"], 2)/1000
+developing_avg <- round(avg_mortality$Average.PerCapitaMortality[avg_mortality$Status == "Developing"], 2)/1000
+developed_ratio <- round((developing_avg / developed_avg), 2)
+
+# Plot the average mortality rates using ggplot
+ggplot(avg_mortality, aes(x = Status, y = Average.PerCapitaMortality/1000, fill = Status)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Average Per-Capita Mortality Rate: Developing vs Developed Countries",
+       x = "Country Status",
+       y = "Average Per-Capita Mortality Rate") +
+  theme_minimal()
+```
+
+The per capita mortality rate of Developing countries is `r developed_ratio` times that of Developed countries. Individually, Developed countries have a per-capita mortality rate of `r developed_avg`, while Developing countries have a per-capita mortality rate of `r developing_avg`.
+
+```{r StatisticalSignificance, echo = F}
+# Problem 3
+
+# Extract values by country status
+developed_values <- df.mortality$PerCapitaMortality[df.mortality$Status == "Developed"]
+developing_values <- df.mortality$PerCapitaMortality[df.mortality$Status == "Developing"]
+
+# Shapiro test for normality
+shapiro_developed <- shapiro.test(developed_values)
+shapiro_developing <- shapiro.test(developing_values)
+
+# Extract W statistics and p-values
+W_developed <- shapiro_developed$statistic
+p_developed <- shapiro_developed$p.value
+W_developing <- shapiro_developing$statistic
+p_developing <- shapiro_developing$p.value
+
+# Check normality and run appropriate significance test
+if (W_developed > 0.9 && p_developed < 0.05 && W_developing > 0.9 && p_developing < 0.05) {
+    # Both groups are normally distributed, run T-test
+    test_result <- t.test(developed_values, developing_values)
+    p_value <- test_result$p.value
+} else {
+    # At least one group is not normally distributed, run Wilcoxon rank-sum test
+    test_result <- wilcox.test(developed_values, developing_values)
+    p_value <- test_result$p.value
+}
+```
+
+#### Statistical Significance of Mortality
+- The difference in mortality between the two types of countries `r ifelse(p_value < 0.05, "is", "is not")` statistically significant, because the p-value extracted from the significance test is `r p_value`. The Shapiro-Wilk test was used to test the normality of the data (Using cutoffs of 0.9 for W and 0.05 for p), which was shown to be `r ifelse((W_developed > 0.9 && p_developed < 0.05 && W_developing > 0.9 && p_developing < 0.05), "normally", "not normally")` distributed. Because the data was `r ifelse((W_developed > 0.9 && p_developed < 0.05 && W_developing > 0.9 && p_developing < 0.05), "normally", "not normally")` distributed, the `r ifelse((W_developed > 0.9 && p_developed < 0.05 && W_developing > 0.9 && p_developing < 0.05), "T-test", "Wilcoxon Rank-Sum Test")` was used to assess the significance of the difference in mortality rate per capita between the groups of Developed and Developing countries.  
+
+```{r LifeExpectancy, echo = F}
+# Problem 4
+
+# Perform Shapiro-Wilk test
+shapiro_test <- shapiro.test(df$Life.expectancy)
+life_p_value <- shapiro_test$p.value
+life_w_value <- shapiro_test$statistic
+```
+
+#### Normality of Life Expectancy Data
+- The Shapiro-Wilk test yielded a p-value of `r life_p_value`, which `r ifelse(life_p_value < 0.05, "is", "is not")` lower than the conventional significance level of 0.05. Additionally, the W-statistic for the distribution of life expectancy `r ifelse(life_w_value > 0.9, "is", "is not")` greater than 0.9, indicating `r ifelse(life_w_value > 0.9, "a normal", "an abnormal")` distribution. These results indicate that we should `r ifelse(life_w_value > 0.9, "accept", "reject")` the null hypothesis, which states that the data is normally distributed.
+
+### 1.2 / Identification of Outliers
+```{r IdentifyOutliers, echo = F}
+# Problem 5
+
+# Extract identifier columns from numeric analysis
+df.identifiers <- df %>% select(Country, Year, Status)
+df.nums <- df %>% select(-Country, -Year, -Status)
+
+# Use all remaining column names for outlier detection
+remaining_cols <- names(df.nums)
+
+# Initialize df to store outliers
+outliers_df <- data.frame(Column = character(), Outlier = numeric(), stringsAsFactors = FALSE)
+
+# Identify outliers loop
+for (col_name in remaining_cols) {
+  
+  # Calculate Mean and Standard Deviation
+  mean_value <- mean(df.nums[[col_name]], na.rm = TRUE)
+  sd_value <- sd(df.nums[[col_name]], na.rm = TRUE)
+  
+  # Calculate Z-scores
+  z_scores <- abs((df.nums[[col_name]] - mean_value) / sd_value)
+  
+  # Identify Outliers
+  outlier_indices <- which(z_scores > 2.8)
+  
+  # Collect Outliers into Data Frame
+  if (length(outlier_indices) > 0) {
+    outliers <- df.nums[[col_name]][outlier_indices]
+    outliers_df <- rbind(outliers_df, data.frame(Column = col_name, Outlier = outliers, stringsAsFactors = FALSE))
+  }
+}
+
+# Expand outliers_df by column name
+# Perplexity helped me figure out how to use a unique identifier to manage row order
+outliers_wide <- outliers_df %>%
+  group_by(Column) %>%
+  mutate(row = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = Column, values_from = Outlier, values_fill = list(Outlier = NA))
+
+# Create a summary table for outliers_wide
+summary_table <- sapply(outliers_wide, function(col) sum(!is.na(col)))
+
+# Convert the summary into a data frame
+summary_df <- data.frame(Column = names(summary_table), Number_of_Outliers = summary_table)
+
+# Count non-NA values in each column of df.nums
+non_na_counts <- sapply(df.nums, function(col) sum(!is.na(col)))
+
+# Add PercentOutliers to summary_df
+summary_df$PercentOutliers <- NA  
+
+for (i in 1:nrow(summary_df)) {
+  column_name <- summary_df$Column[i]
+  
+  # Get the number of outliers from summary_df
+  outlier_count <- summary_df$Number_of_Outliers[i]
+  
+  # Count of non-NA values
+  non_na_count <- non_na_counts[column_name]
+  
+  # Check if non_na_count is NA or zero
+  if (!is.na(non_na_count) && non_na_count > 0) {
+    summary_df$PercentOutliers[i] <- (outlier_count / non_na_count) * 100
+  } else {
+    summary_df$PercentOutliers[i] <- NA  
+  }
+}
+
+# Remove row labels from summary_df
+row.names(summary_df) <- NULL
+# Display the summary data frame
+pander(summary_df)
+
+# Calculate Statistics for summary
+life_expectancy <- df$Life.expectancy
+max_life_expectancy <- max(life_expectancy, na.rm = TRUE)
+min_life_expectancy <- min(life_expectancy, na.rm = TRUE)
+sd_life_expectancy <- sd(life_expectancy, na.rm = TRUE)
+median_life_expectancy <- median(life_expectancy, na.rm = TRUE)
+```
+
+The table above contains the numbers of outliers present in each numeric column of the dataset. Outliers are defined as more than 2.8 standard deviations from the mean, and were identified using Z-scoring. Outliers can be handled in several ways, notably we can A) trim the dataset to remove outliers, B) scale the data to better fit our model using a log or square root transformation, or C) replace outliers with imputed values such as the mean or median. 
+
+The maximum life expectancy was `r max_life_expectancy`, and the minumum life expectancy was `r min_life_expectancy`, with a standard deviation of `r round(sd_life_expectancy, 1)` and a median of `r median_life_expectancy`. Calculating a trimmed mean is not a good option with the life expectancy data, because based on the outlier counts, there are not very many and their effect on the central tendencies of the data is relevant and should not be removed. In order to calculate the percent I would trim, I would identify what percent of the data is made up of outliers, and trim about that much off either tail. In practice, the life expectancy column has very few outliers, and given the nature of this data, I do not think they should be removed. 
+
+### 1.3 / Data Preparation
+```{r Z-Score, echo = F}
+# Problem 6
+
+# Function to calculate Z-scores by column
+z_score <- function(column) {
+  mu <- mean(column, na.rm = TRUE)  
+  sigma <- sd(column, na.rm = TRUE)  
+  z_scores <- (column - mu) / sigma
+  return(z_scores)
+}
+
+# Remove rows with any NA values in numeric columns
+# Decided to do this instead of imputing values for NA columns because our dataset is large enough to handle losing some rows
+df_clean <- df %>%
+  na.omit()
+
+# Create a new data frame with Z-scores for numeric columns only
+df.zscore <- df_clean %>%
+  mutate(across(where(is.numeric) & !c(Year), z_score))
+
+# Display the new data frame with Z-scores
+# head(df.zscore, 5)
+```
+
+Normalizing the data using Z-scoring ensures that the data for each feature is on a similar scale, which is important when dealing with algorithms that are sensitive to scale, such as distance-based algorithms (k-nearest neighbors).
+
+```{r DiseaseSum, echo = F}
+# Problem 7
+
+# Calculate Disease Sum (cleaned df)
+df_clean <- df_clean %>%
+  mutate(disease = Hepatitis.B + Measles + Polio + HIV.AIDS + Diphtheria)
+
+# Calculate Disease Sum (numeric df)
+df.nums <- df.nums %>%
+  mutate(disease = Hepatitis.B + Measles + Polio + HIV.AIDS + Diphtheria)
+
+# Sum disease columns and then z-score summed column
+df.z <- df_clean %>%
+  mutate(across(where(is.numeric) & !c(Year), z_score))
+```
+
+### 1.4 / Sampling Training and Validation Data
+```{r ShuffleData, echo = F}
+# Problem 8
+
+# Shuffle the data
+df.z <- df.z %>% sample_frac(size = 1)
+indxTrain <- (round(nrow(df.zscore) * 0.85))
+
+# Create training and validation sets
+df.train <- df.z[1:indxTrain, 4:22]  # First 85% of rows
+df.val <- df.z[(indxTrain + 1):nrow(df.z), 4:22]  # Remaining rows
+
+# Extract Labels
+labels.train <- df.z[1:indxTrain, 3]
+labels.val <- df.z[(indxTrain + 1):nrow(df.z), 3]
+```
+
+### 1.5 / Predictive Modeling
+```{r kNN.Predict, echo = F}
+# Problem 9
+
+# Define the new point
+new_data <- data.frame(
+  Life.expectancy = 67.4,
+  Adult.Mortality = 293,
+  infant.deaths = 4,
+  Alcohol = 2.68,
+  percentage.expenditure = 40.7,
+  Hepatitis.B = 40,
+  Measles = 671,
+  BMI = 14.2,
+  GDP = 687,
+  under.five.deaths = 211,
+  Polio = 20,
+  Diphtheria = 97
+)
+
+# Calculate mean, sd, and median for each numeric column excluding target
+means <- colMeans(df.nums, na.rm = TRUE)
+sds <- sapply(df.nums, sd, na.rm = TRUE)
+medians <- apply(df.nums, 2, median, na.rm = TRUE)
+
+# Function to calculate z-score by row
+z_score_new_row <- function(new_row, means, sds) {
+  numeric_cols <- sapply(new_row, is.numeric)
+  z_scores <- new_row
+  z_scores[numeric_cols] <- (new_row[numeric_cols] - means[names(new_row)[numeric_cols]]) / sds[names(new_row)[numeric_cols]]
+  return(z_scores)
+}
+
+# Check the columns that are missing in new_data
+missing_columns <- setdiff(colnames(df.nums), colnames(new_data))
+
+# Impute missing values with median if necessary
+for (col in missing_columns) {
+  if (col %in% names(medians)) {
+    new_data[[col]] <- medians[col]
+  }
+}
+
+# Calculate the disease column
+new_data$disease <- new_data$Hepatitis.B + new_data$Measles + new_data$Polio + new_data$Diphtheria
+
+# Now Z-score the entire new data including the disease column
+new_data_zscore <- z_score_new_row(new_data, means, sds)
+
+# Print the final Z-scored new data point
+# print(new_data_zscore)
+
+# Make the prediction using the knn function, excluding identifier columns
+predicted_status <- knn(train = df.train,
+                         test = matrix(new_data_zscore[names(df.train)], nrow = 1),
+                         cl = labels.train,
+                         k = 6)
+
+# View the predicted status
+# predicted_status
+```
+The kNN function from the class package with k = 6 was applied to predict the country status for the data point above. Missing values were imputed using the median of the original dataset. The new data point was standardized using z-scoring, as were the training and test sets. The model predicts that the new data point is a `r predicted_status` country. The kNN model classifies new data points based on the majority class of their k nearest neighbors in the feature space, which makes it useful for classification tasks such as this one. 
+
+### 1.6 / Model Accuracy
+```{r ModelAccuracy, echo = F}
+# Question 10
+
+# Set up a vector to store accuracies
+accuracies <- numeric(length = 8)  
+
+# Iterate over k from 3 to 10
+for (k in 3:10) {
+  # Make predictions using kNN
+  predictions <- knn(train = df.train, 
+                     test = df.val, 
+                     cl = labels.train, 
+                     k = k)
+  
+  # Calculate accuracy
+  accuracy <- sum(predictions == labels.val) / length(labels.val) * 100
+  accuracies[k - 2] <- accuracy  # Store accuracy for the corresponding k
+}
+
+# Create a data frame for plotting
+results <- data.frame(k = 3:10, Accuracy = accuracies)
+
+# Plot the results
+ggplot(results, aes(x = k, y = Accuracy)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "kNN Accuracy vs. k Values",
+       x = "Number of Neighbors (k)",
+       y = "Accuracy (%)") +
+  theme_minimal()
+
+# Find the k with the maximum accuracy
+best_result <- results[which.max(results$Accuracy), ]
+best_k <- best_result$k
+```
+The plot above shows the percent accuracy of the trained model on the testing data using values of k from 3 - 10. I used the kNN model that I wrote to test the ccuracy of the model and identify the best value of k to use with my data. Through inspection of the plot, I would choose k = `r best_k` for my final model, as it reports the highest accuracy. 
+
+
+## 2 / Predicting Shucked Weight of Abalones using Regression kNN
+
+### 2.1 / Creating Training and Target Datasets
+The Training Set (Example Rows):
+```{r LoadAbalone, echo = F}
+# Question 1 
+
+# URL of the CSV file
+url.ab <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/abalone.csv"
+
+# Read the CSV file into a data frame
+df.ab <- read.csv(url.ab, stringsAsFactors = FALSE, header = T)
+
+# Save the values of the "Shucked Weight" column in a separate vector
+target_data <- df.ab$ShuckedWeight
+
+# Create a new dataset containing all the training features without "Shucked Weight"
+train_data <- df.ab[, !names(df.ab) %in% c("ShuckedWeight")]
+
+head(train_data, 5)
+```
+
+### 2.2 / Encoding Categorical Variables
+```{r CategoricalVariables, echo = F}
+# Question 2
+
+# Mutate the training data to one-hot encode the Sex column
+train_data <- train_data %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = Sex, values_from = value, values_fill = 0)
+
+# head(train_data, 5)
+```
+I chose to encode the categorical column "Sex" using the one-hot scheme, which creates an explicit column of binary data for each category (M/F/I) that is easily accessed by the model. I am using min-max normalization for the numeric data, so the binary encoded data will be on the same scale as the rest of the dataset. 
+ 
+### 2.3 / Min-Max Normalization
+```{r MinMax, echo = F}
+# Question 3
+
+# Function for Min-Max Normalization
+min_max_normalize <- function(column, min_val, max_val) {
+  return((column - min_val) / (max_val - min_val))
+}
+
+# Calculate min and max for each column to use for normalization
+min_values <- sapply(train_data[, 1:7], min, na.rm = TRUE)
+max_values <- sapply(train_data[, 1:7], max, na.rm = TRUE)
+
+# Normalize the appropriate columns in train_data
+normalized_columns <- lapply(1:7, function(i) {
+  min_max_normalize(train_data[[i]], min_values[i], max_values[i])
+})
+
+# Assign the normalized values back to train_data
+train_data[, 1:7] <- as.data.frame(normalized_columns)
+
+# Display the normalized data
+# head(train_data, 5)
+```
+
+### 2.4 / Writing kNN Function
+```{r ManualKNN, echo = F}
+# Question 4
+
+# Manual KNN function
+knn.reg <- function(new_data, target_data, train_data, k) {
+  # Calculate distances from the new_data row to all training data rows
+  distances <- apply(train_data, 1, function(row) {
+    sqrt(sum((as.numeric(row) - as.numeric(new_data))^2))
+  })
+  
+  # Get the indices of the k nearest neighbors
+  nearest_indices <- order(distances)[1:k]
+  
+  # Calculate the average Shucked Weight of the nearest neighbors
+  predicted_weight <- mean(target_data[nearest_indices])
+  
+  return(predicted_weight)
+}
+
+# Test case
+new_data_single <- data.frame(
+  Length = 0.5,        
+  Diameter = 0.4,
+  Height = 0.1,
+  WholeWeight = 0.3,
+  VisceraWeight = 0.05,
+  ShellWeight = 0.07,
+  NumRings = 6,
+  M = 1,
+  F = 0,
+  I = 0
+)
+
+# Normalize the test case
+new_data_single_normalized <- data.frame(
+  Length = min_max_normalize(new_data_single$Length, min_values["Length"], max_values["Length"]),
+  Diameter = min_max_normalize(new_data_single$Diameter, min_values["Diameter"], max_values["Diameter"]),
+  Height = min_max_normalize(new_data_single$Height, min_values["Height"], max_values["Height"]),
+  WholeWeight = min_max_normalize(new_data_single$WholeWeight, min_values["WholeWeight"], max_values["WholeWeight"]),
+  VisceraWeight = min_max_normalize(new_data_single$VisceraWeight, min_values["VisceraWeight"], max_values["VisceraWeight"]),
+  ShellWeight = min_max_normalize(new_data_single$ShellWeight, min_values["ShellWeight"], max_values["ShellWeight"]),
+  NumRings = min_max_normalize(new_data_single$NumRings, min_values["NumRings"], max_values["NumRings"]),
+  M = new_data_single$M,
+  F = new_data_single$F,
+  I = new_data_single$I
+)
+
+# Set k
+k <- 5
+
+# Get predicted value for a single new data point
+predicted_weight_single <- knn.reg(new_data_single_normalized, target_data, train_data, k)
+
+# Test case predicted weight
+# print(round(predicted_weight_single, 3))
+```
+
+### 2.5 / Forecasting Shucked Weight
+```{r ForecastWeight, echo = F}
+
+# Create df 
+prediction_point <- data.frame(
+  Length = 0.38,        
+  Diameter = 0.490,
+  Height = 0.231,
+  WholeWeight = 0.4653,
+  VisceraWeight = 0.0847,
+  ShellWeight = 0.17,
+  NumRings = 11,
+  M = 1,
+  F = 0,
+  I = 0
+)
+
+# Normalize prediction_point
+prediction_point_normalized <- data.frame(
+  Length = min_max_normalize(prediction_point$Length, min_values["Length"], max_values["Length"]),
+  Diameter = min_max_normalize(prediction_point$Diameter, min_values["Diameter"], max_values["Diameter"]),
+  Height = min_max_normalize(prediction_point$Height, min_values["Height"], max_values["Height"]),
+  WholeWeight = min_max_normalize(prediction_point$WholeWeight, min_values["WholeWeight"], max_values["WholeWeight"]),
+  VisceraWeight = min_max_normalize(prediction_point$VisceraWeight, min_values["VisceraWeight"], max_values["VisceraWeight"]),
+  ShellWeight = min_max_normalize(prediction_point$ShellWeight, min_values["ShellWeight"], max_values["ShellWeight"]),
+  NumRings = min_max_normalize(prediction_point$NumRings, min_values["NumRings"], max_values["NumRings"]),
+  M = prediction_point$M,
+  F = prediction_point$F,
+  I = prediction_point$I
+)
+
+# Set k
+k <- 3
+
+# Get predicted value for a single new data point
+predicted_weight <- knn.reg(prediction_point_normalized, target_data, train_data, k)
+rounded_weight <- (round(predicted_weight, 3))
+```
+The predicted weight for the provided data point is `r rounded_weight`. 
+
+### 2.6 / Calculating Mean Squared Error
+```{r MeanSquaredError, echo = F}
+
+# Combine Target with Normalized Data
+normalized_df <- cbind(train_data, ShuckedWeight = target_data)
+
+# Set Seed for reproducibility
+set.seed(100)
+
+# Measure Time for Sampling
+start_time <- Sys.time()
+
+# Randomly Sample 20% for Test Data
+sample_index <- sample(seq_len(nrow(normalized_df)), size = 0.2 * nrow(normalized_df))
+test_data <- normalized_df[sample_index, ]
+train_data_final <- normalized_df[-sample_index, ]
+
+# Separate Target for Test Data
+target_test <- test_data$ShuckedWeight
+test_data <- test_data[, !names(test_data) %in% c("ShuckedWeight")]
+target_train <- train_data_final$ShuckedWeight
+train_data_final <- train_data_final[, !names(train_data_final) %in% c("ShuckedWeight")]
+
+end_time <- Sys.time()
+cat("Time taken for sampling: ", end_time - start_time, "\n")
+
+# Measure Time for Predictions
+start_time <- Sys.time()
+
+# Predict Shucked Weight for the Test Data
+k <- 5  # Set k
+predicted_weights <- apply(test_data, 1, function(x) knn.reg(x, target_train, train_data_final, k))
+
+end_time <- Sys.time()
+cat("Time taken for predictions: ", end_time - start_time, "\n")
+
+# Calculate Mean Squared Error (MSE)
+mse <- mean((predicted_weights - target_test)^2)
+cat("Mean Squared Error (MSE):", mse)
+```
+
+
+## 3 / Forecasting Future Sales Price
+
+```{r LoadHomes, echo = F}
+# URL of the CSV file
+url.homes <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/HomeSalesUFFIData.csv"
+
+# Read the CSV file into a data frame
+df.homes <- read.csv(url.homes, stringsAsFactors = FALSE, header = T)
+```
+
+```{r HomesStats, echo = F}
+# Avoid scientific notation
+options(scipen = 999)  
+
+# Calculate initial statistics
+total_homes <- nrow(df.homes)
+oldest_home <- min(df.homes$YearSold, na.rm = T)
+newest_home <- max(df.homes$YearSold, na.rm = T)
+
+# Calculate the median SalesPrice
+df.homes$SalesPrice <- as.numeric(gsub(",", "", df.homes$SalesPrice))
+median_value <- median(df.homes$SalesPrice, na.rm = TRUE)
+
+# Calculate the 10% trimmed mean
+trimmed_mean <- round(mean(df.homes$SalesPrice, trim = 0.1, na.rm = TRUE))
+
+# Calculate the SD of SalesPrice
+sales_price_sd <- round(sd(df.homes$SalesPrice, na.rm = TRUE))
+
+# Create annual statistics table
+# Asked ChatGPT to make my code more streamlined
+summary_table <- df.homes %>%
+  group_by(YearSold) %>%
+  summarize(
+    TotalHomesSold = n(),
+    TrimmedMeanPrice = mean(SalesPrice, trim = 0.1, na.rm = TRUE),
+    MedianPrice = median(SalesPrice, na.rm = TRUE)
+  ) %>%
+  filter(!is.na(TrimmedMeanPrice) & !is.na(MedianPrice)) # Remove rows with NAs
+
+## Forecasting Price ##
+
+# Extract the last three years of median prices
+last_three_years <- summary_table %>%
+  arrange(YearSold) %>%
+  tail(3) # Get the last 3 years
+
+# Extract median prices
+median_prices <- last_three_years$MedianPrice
+
+# Assign weights
+weights <- c(0.1, 0.2, 0.7)
+
+# Calculate the weighted moving average
+wma_forecasted_price <- sum(median_prices * weights)
+model <- lm(MedianPrice ~ YearSold, data = summary_table)
+
+# Predict next year's price 
+next_year <- max(summary_table$YearSold) + 1
+linear_predicted_price <- predict(model, newdata = data.frame(YearSold = next_year))
+
+# Calculate the average prediction 
+averaged_prediction <- round((linear_predicted_price + wma_forecasted_price) / 2)
+
+## AC and Pool Homes Subset ##
+
+earliest_year <- df.homes %>%
+  filter(HasPool == 1, HasAC == 1) %>%
+  summarise(EarliestYear = min(YearSold, na.rm = TRUE)) %>%
+  pull(EarliestYear)
+
+# Filter homes with pools and air conditioning for the years 2016 and 2023
+filtered_homes <- df.homes %>%
+  filter(HasAC == 1, HasPool == 1, YearSold %in% c(earliest_year, 2023))
+
+# Calculate the average sales price for each of the specified years
+average_prices <- filtered_homes %>%
+  group_by(YearSold) %>%
+  summarize(AverageSalesPrice = mean(as.numeric(gsub(",", "", SalesPrice)), na.rm = TRUE))
+
+# Extracting values directly
+avg_price_2017 <- average_prices$AverageSalesPrice[average_prices$YearSold == earliest_year]
+avg_price_2023 <- average_prices$AverageSalesPrice[average_prices$YearSold == 2023]
+
+```
+
+We obtained a data set with a total of `r total_homes` sales transactions for the years from `r oldest_home` to `r newest_home`. The median sales price for the entire time frame was $`r median_value`, while the 10% trimmed mean was $`r trimmed_mean` (sd = $`r sales_price_sd`). Broken down by year, we have the following number of sales, plus the 10% trimmed mean and median sales prices per year:
+
+```{r SummaryTable, echo = F}
+# Use knitr::kable() to format summary table
+kable(summary_table, format = "simple")
+```
+
+As the graph below shows, the median sales price per year has been increasing.
+
+```{r SalesBarChart, echo = F}
+# Plot Bar Graph 
+ggplot(summary_table, aes(x = factor(YearSold), y = MedianPrice)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+       x = "Year Sold",
+       y = "Median Price") +
+  theme_minimal()
+```
+Using both a weighted moving average forecasting model that averages the prior 3 years (with weights of 0.7, 0.2, and 0.1) and a linear regression trend line model, we predict next year's average sales price to be around $`r averaged_prediction` (average of the two forecasts). The average home price of homes with both pools and air conditioning changed from $`r avg_price_2017` in `r earliest_year` (earliest year for which data is available) to $`r avg_price_2023` in `r newest_home` (most recent year's sales data).
