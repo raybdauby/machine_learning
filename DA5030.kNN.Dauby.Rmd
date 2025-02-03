@@ -1,0 +1,137 @@
+---
+title: "DA5030 kNN"
+author: "Dauby, Ray"
+date: "09-30-24"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+```{r Packages, include = FALSE}
+if (!require(dplyr)) {
+  install.packages("dplyr")
+}
+
+if (!require(caret)) {
+  install.packages("caret")
+}
+
+if (!require(gmodels)) {
+  install.packages("gmodels")
+}
+```
+
+## Question 2
+```{r LoadData, echo = TRUE}
+# URL of the CSV file
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/Prostate_Cancer_Modified.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(url, stringsAsFactors = FALSE, header = T)
+
+# Show the first five rows of df
+head(df, 5)
+```
+
+## Question 3
+```{r ReplaceNAs, echo = TRUE}
+# Calculate the 10% trimmed mean of the smoothness column
+smoothness_trimmed_mean <-  mean(df$smoothness, trim = 0.1, na.rm = TRUE)
+
+# Replace NAs with the trimmed mean
+df$smoothness[is.na(df$smoothness)] <- smoothness_trimmed_mean
+```
+
+## Question 4
+```{r StandardizeData, echo = TRUE}
+library(dplyr)
+
+# Function to calculate z-score
+z_score <- function(x) {
+  (x - mean(x)) / sd(x)
+}
+
+# Select all numeric columns
+numeric_columns <- df %>% select(-id, -diagnosis_result)
+
+# Calculate z-score
+df.norm <- df %>%
+  mutate(across(all_of(names(numeric_columns)), z_score))
+```
+
+## Question 5
+```{r SplitData, echo = TRUE}
+library(caret)
+
+# Use caret function createDataPartition to split data into training and test sets
+# Example from kNN practice exercise
+indxTrain <- createDataPartition(y = df.norm$diagnosis_result, p = 0.8, list = FALSE)
+df.train <- df.norm[indxTrain,]
+df.val <- df.norm[-indxTrain,]
+```
+
+## Question 6
+```{r SubsetAnalysis, echo = TRUE}
+# Function to calculate class distribution
+# Asked ChatGPT for help formatting the output of this function
+class_distribution <- function(data) {
+  distribution <- table(data$diagnosis_result)
+  proportions <- prop.table(distribution)
+  return(data.frame(Class = names(distribution), Count = as.vector(distribution), Proportion = as.vector(proportions)))
+}
+
+# Analyze distributions
+original_distribution <- class_distribution(df.norm)
+train_distribution <- class_distribution(df.train)
+val_distribution <- class_distribution(df.val)
+
+# Print distributions
+print(original_distribution)
+print(train_distribution)
+print(val_distribution)
+```
+
+- **Class Imbalance**:
+  - The training set has a class distribution that is very similar to the original dataset
+  - The validation set also retains a similar distribution, but the absolute counts are lower because of the smaller amount of data
+
+- **Proportionality Compared to the Original Dataset**:
+  - The proportions of Benign and Malignant classifications in both the training and validation sets are consistent with the original data
+  - Class imbalance is not a major issue
+
+- **Addressing Imbalance**:
+  - Given that the proportions are relatively consistent across the datasets, the need for intervention is low
+  - If further analysis reveals that model performance is lacking, oversampling minority class B may yield better results
+
+## Question 7:
+```{r KnnModel, echo = TRUE}
+# Calculate k as the square root of the number of observations in df.train
+k <- round(sqrt(nrow(df.train)))
+
+# Train the KNN model using caret
+model <- train(diagnosis_result ~ ., data = df.train, method = "knn", tuneGrid = expand.grid(k = k))
+
+# Output the model summary
+print(model)
+```
+
+## Question 8: 
+```{r ConfusionMatrix, echo = TRUE}
+library(gmodels)
+
+# Make predictions on the validation set
+predictions <- predict(model, newdata = df.val)
+
+# Create and display the confusion matrix
+CrossTable(x = df.val$diagnosis_result, y = predictions, prop.chisq = FALSE)
+```
+
+## Question 9: 
+
+### kNN Model Performance Summary
+
+- **The kNN algorithm exhibits an overall accuracy of `r round(mean(predictions == df.val$diagnosis_result) * 100, 2)`% with a true positive rate of `r round(sum(predictions == "M" & df.val$diagnosis_result == "M") / sum(df.val$diagnosis_result == "M") * 100,2)`% and a true negative rate of `r round(sum(predictions == "B" & df.val$diagnosis_result == "B") / sum(df.val$diagnosis_result == "B") * 100,2)`%.**
+
+
+
