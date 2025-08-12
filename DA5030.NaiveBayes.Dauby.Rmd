@@ -1,0 +1,187 @@
+---
+title: "DA5030 Naive Bayes"
+author: "Dauby, Ray"
+date: "10-15-24"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r Packages, include = F}
+
+# List of packages to check
+packages <- c("dplyr", "e1071", "gmodels")
+
+# Install packages if they are not already installed
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+  }
+}
+
+# Load the necessary libraries
+lapply(packages, library, character.only = TRUE)
+
+```
+
+### Question 2
+
+```{r LoadData, echo = T}
+
+# URL of the CSV file
+url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/HouseVotes-1984-ButOne.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(url, stringsAsFactors = FALSE, header = T)
+
+# Show the first five rows of df
+head(df, 5)
+
+```
+
+### Question 3
+
+```{r RandomSamples, echo = T}
+
+# Empty lists for training and validation data
+training_data <- list()
+validation_data <- list()
+
+set.seed(100)
+
+# 5 random samples
+for (i in 1:5) {
+  # Sample 350 rows
+  train_indices <- sample(nrow(df), 350)
+  
+  # Training data
+  training_data[[i]] <- df[train_indices, ]
+  
+  # Validation data
+  validation_data[[i]] <- df[-train_indices, ]
+}
+
+```
+
+### Question 4
+
+```{r NaiveBayes, echo = T}
+
+# Empty list to store the models
+nb_models <- list()
+
+# Train Naive Bayes models 
+nb_models <- lapply(training_data, function(train_set) {
+  # Convert the party column to a factor
+  train_set$party <- as.factor(train_set$Class)
+  
+  # Train the Naive Bayes model
+  model <- naiveBayes(Class ~ ., data = train_set)
+  
+  return(model)
+})
+
+```
+
+### Question 5
+
+```{r HomogeneousEnsemble, echo = T}
+
+# Ensemble function
+predict_party <- function(models, new_cases) {
+  # Vector to store predictions
+  predictions <- vector("list", length(models))
+  
+  # Make predictions
+  for (i in seq_along(models)) {
+    predictions[[i]] <- predict(models[[i]], new_cases)
+  }
+  
+  # Determine the majority vote
+  final_predictions <- apply(do.call(cbind, predictions), 1, function(x) {
+    names(sort(table(x), decreasing = TRUE))[1]
+  })
+  
+  return(final_predictions)
+}
+
+```
+
+### Question 6
+
+```{r ModelAccuracy, echo = T}
+
+# Vectors to store results
+accuracies <- numeric(5)
+tprs <- numeric(5)
+tnrs <- numeric(5)
+
+# Pull metrics for each validation dataset
+for (i in 1:5) {
+  # Get the validation set
+  val_set <- validation_data[[i]]
+  
+  # Make predictions
+  predictions <- predict_party(nb_models, val_set)
+  
+  # Confusion matrix
+  matrix <- table(Actual = val_set$Class, Predicted = predictions)
+  
+  # Calculate metrics
+  accuracies[i] <- sum(diag(matrix)) / sum(matrix)
+  tprs[i] <- matrix[2, 2] / sum(matrix[2,])
+  tnrs[i] <- matrix[1, 1] / sum(matrix[1,])
+}
+
+# Mean performance across all folds
+mean_performance <- c(
+  Accuracy = mean(accuracies),
+  TruePositiveRate = mean(tprs),
+  TrueNegativeRate = mean(tnrs)
+)
+
+# Result table
+result_table <- data.frame(
+  Metric = names(mean_performance),
+  Value = mean_performance
+)
+row.names(result_table) <- NULL
+print(result_table)
+
+```
+
+### Question 7
+
+```{r PredictParty, echo = T}
+
+# Member voting record
+new_member_votes <- data.frame(
+  V1 = "n",
+  V2 = "y",
+  V3 = "n",
+  V4 = "y",
+  V5 = "y",
+  V6 = "y",
+  V7 = "n",
+  V8 = "n",
+  V9 = "n",
+  V10 = "y",
+  V11 = "n",
+  V12 = "y",
+  V13 = "y",
+  V14 = "y",
+  V15 = NA,
+  V16 = "n",
+  stringsAsFactors = FALSE
+)
+
+# Prediction using ensemble 
+predicted_party <- predict_party(nb_models, new_member_votes)
+
+# Add party name
+party_name <- ifelse(predicted_party == 1, "democrat", 
+                      ifelse(predicted_party == 2, "republican", NA))
+
+print(party_name)
+```
+
