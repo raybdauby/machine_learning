@@ -1,0 +1,184 @@
+---
+title: "DA5030 Regression"
+author: "Dauby, Ray"
+date: "10-28-24"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r Packages, include = F}
+library(psych)
+library(caret)
+library(MASS)
+library(dplyr)
+```
+
+### Problem 2:
+
+```{r LoadData, echo = T}
+# file path of the data file
+filepath <- "ConcreteStrengthData.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(filepath, header = T)
+
+# Examine dataset structure
+head(df, 5)
+summary(df)
+str(df)
+```
+
+### Problem 3: 
+
+```{r MissingValues, echo = T}
+# Identify missing values in each column
+missing_values <- sapply(df, function(x) sum(is.na(x)))
+
+# Display columns with missing values
+missing_values[missing_values > 0]
+```
+Given that there are only 3 missing values in the same column (plasticizer), I will use the mean value of that column and impute the missing values. Based on the summary data, the mean and median are close together which indicates that outliers are not skewing the data. 
+
+### Problem 4: 
+
+```{r ImputeMean, echo = T}
+# Calculate the mean of the plasticizer column
+mean_plasticizer <- mean(df$plasticizer, na.rm = TRUE)
+
+# Impute NA values in the plasticizer column with the mean
+df$plasticizer[is.na(df$plasticizer)] <- mean_plasticizer
+```
+
+### Problem 5: 
+
+```{r RemoveOutliers, echo = T}
+
+# Function to identify and remove outliers using z-scores
+remove_outliers_z <- function(data) {
+  z_scores <- scale(data, center = TRUE, scale = TRUE)
+  data[abs(z_scores) > 3] <- NA  # Replace outliers with NA
+  return(data)
+}
+
+# Clean the data
+df_cleaned <- remove_outliers_z(df)
+
+# Optionally, remove rows with NA values resulting from outlier removal
+df_cleaned <- na.omit(df_cleaned)
+
+# Check the structure and summary of the cleaned data
+summary(df_cleaned)
+str(df_cleaned)
+
+print(nrow(df))
+print(nrow(df_cleaned))
+```
+
+### Problem 6: 
+
+```{r NormalDistributions, echo = T}
+# omit target variable strength
+pairs.panels(df[c("cement", "slag", "ash", "water", "plasticizer", "coarse_agg", "fine_agg", "age")]) 
+
+hist(log(df$slag))
+hist(log(df$ash))
+hist(log(df$plasticizer))
+hist(log(df$age))
+
+df_transformed <- df %>%
+  mutate(
+    log_slag = log(slag + 1),
+    log_ash = log(ash + 1),
+    log_plasticizer = log(plasticizer + 1),
+    log_age = log(age + 1)
+  ) %>%
+  select(-slag, -ash, -plasticizer, -age) 
+
+head(df_transformed)
+```
+based on the histograms above, it seems that the features: cement, water, coarse_agg, and fine_agg are relatively normally distributed, while slag, ash, plasticizer, and age will need to be transformed to fit the Gaussian expectation for statistical models. After some analysis of the non-gaussian distributed features, a log transformation seems to work best for all four features to normalize their distributions. I tried using log(), sqrt(), 1/() and ()^2 on the features. 
+
+### Problem 7: 
+
+```{r MultiColinearity, echo = T}
+# Omit target variable strength from correlation plots
+cor(df_transformed[c("cement", "log_slag", "log_ash", "water", "log_plasticizer", "coarse_agg", "fine_agg", "log_age")])
+pairs(df_transformed[c("cement", "log_slag", "log_ash", "water", "log_plasticizer", "coarse_agg", "fine_agg", "log_age")], cex = 0.1,)
+```
+The correlation matrix and scatterplots indicate that there is no significant multicolinearity between any of the predictor features. The highest correlation seen in the matrix above is -0.61, between the water and plasticizer features. The presence of multicolinearity would indicate that multiple predictive variables directly predict the target variable, which could lead to high p-values and a more inaccurate model. 
+
+### Problem 8:
+
+```{r SplitData, echo = T}
+# Partition data on target variable strength
+train_index <- createDataPartition(df_transformed$strength, p = 0.85, list = FALSE)
+
+# Split the data into training and validation sets
+train_set <- df_transformed[train_index, ]
+validation_set <- df_transformed[-train_index, ]
+```
+
+### Problem 9:
+
+```{r RegressionModel, echo = T}
+# build regression model with all features
+model <- lm(strength ~ ., data = df_transformed)
+
+# examine model summary statistics
+summary(model)
+AIC(model)
+
+# Perform stepwise selection based on AIC
+stepwise_model <- stepAIC(model, direction = "both", trace = TRUE)
+
+# Display the final model summary
+summary(stepwise_model)
+```
+
+### Problem 10:
+
+```{r EvaluatePerformance, echo = T}
+# Make predictions on the validation dataset
+predictions <- predict(stepwise_model, newdata = validation_set)
+
+# Calculate Mean Squared Error (MSE)
+mse <- mean((validation_set$strength - predictions)^2)
+print(mse)
+```
+
+### Problem 11:
+
+```{r MakePredictions, echo = T}
+# Create a new data frame for the new observation
+new_data <- data.frame(
+  cement = 535,
+  log_slag = log(0+1),
+  log_ash = log(0+1),
+  water = 160,
+  log_plasticizer = log(2.5+1),
+  coarse_agg = 1000,
+  fine_agg = 695,
+  log_age = log(30+1)
+)
+
+# Make the prediction
+predicted_strength <- predict(stepwise_model, newdata = new_data)
+print(predicted_strength)
+```
+
+### Problem 12:
+
+```{r ConfidenceInterval, echo = T}
+# Extract Residual Standard Error
+rse <- summary(stepwise_model)$sigma
+
+# Calculate 95% CI
+upper_bound <- predicted_strength + 1.96*rse
+lower_bound <- predicted_strength - 1.96*rse
+
+# Display 95% CI
+print(lower_bound)
+print(upper_bound)
+```
+
