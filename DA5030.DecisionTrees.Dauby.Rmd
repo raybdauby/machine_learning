@@ -1,0 +1,195 @@
+---
+title: "DA5030 Decision Trees"
+author: "Dauby, Ray"
+date: "10-22-24"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r Packages, include = F}
+library(ggplot2)
+library(GGally)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(C50)
+library(gmodels)
+```
+
+### Question 2
+
+```{r ReadFile, echo = T}
+# file path of the data file
+filepath <- "bank-term-deposit-marketing-full.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(filepath, sep = ";", header = T, stringsAsFactors = T)
+```
+
+### Question 3
+
+```{r EDA, echo = T}
+# Show the first five rows of df
+head(df, 5)
+
+# Show data summary 
+summary(df)
+
+# Show data size
+str(df)
+
+# Check for NA values in the df
+any_na <- any(is.na(df))
+print(any_na)
+
+# Bar plot for target variable 'y'
+ggplot(df, aes(x = y)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Subscriptions to Term Deposits",
+       x = "Subscribed to Term Deposit (y)",
+       y = "Count")
+
+# Box plot for balance
+ggplot(df, aes(x = y, y = balance)) +
+  geom_boxplot(fill = "steelblue") +
+  labs(title = "Balance by Subscription Status",
+       x = "Subscribed to Term Deposit (y)",
+       y = "Balance")
+
+# Histogram for age
+ggplot(df, aes(x = age)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "black") +
+  labs(title = "Age Distribution",
+       x = "Age",
+       y = "Frequency")
+
+# Create a pair plot for selected features
+ggpairs(df[, c("age", "duration", "y")],
+        aes(color = y, alpha = 0.5))
+```
+
+There are no missing values in the loaded dataset, so they do not need to be handled. If there were missing data, I could impute a mean value or remove NAs, however decision trees tend to be relatively robust to missing values and outliers, so manual handling of this type of value may be unnecessary. 
+
+### Question 4
+
+```{r SplitData, echo = T}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Create a partition for the target variable 'y'
+train_index <- createDataPartition(df$y, p = 0.8, list = FALSE)
+
+# Split the data into training and validation sets
+train_set <- df[train_index, ]
+validation_set <- df[-train_index, ]
+
+# Check target variable distribution
+print(prop.table(table(train_set$y)) * 100)
+print(prop.table(table(validation_set$y)) * 100)
+```
+
+### Question 5
+
+```{r RpartModel, echo = T}
+str(train_set)
+# Fit the decision tree model using Gini Index
+model <- rpart(y ~ ., data = train_set, method = "class", parms = list(split = "gini"))
+
+# Print the model summary
+print(model)
+levels(train_set$job)
+```
+
+### Question 6
+
+```{r VisualizeRpart, echo = T}
+# Visualize the tree using rpart.plot
+rpart.plot(model, main = "Decision Tree for Subscription", type = 1, extra = 1)
+```
+
+### Question 7
+
+```{r EvaluateRpartModel, echo = T}
+# Generate predictions on the validation set
+predictions <- predict(model, validation_set, type = "class")
+
+# Create a confusion matrix
+conf_matrix <- confusionMatrix(predictions, validation_set$y)
+print(conf_matrix)
+
+# Extract performance metrics
+accuracy <- conf_matrix$overall['Accuracy']
+# True Positive Rate
+true_positive_rate <- conf_matrix$byClass['Sensitivity']
+# True Negative Rate
+true_negative_rate <- conf_matrix$byClass['Specificity']  
+```
+
+The overall accuracy of the rpart model was `r accuracy`, and the true positive rate was `r true_positive_rate`, and the true negative rate was `r true_negative_rate`. Class imbalance may have affected the results because the ratio of the majority class to the minority class is very high, which may cause the model to be more accurate when predicting for the majority class than the minority class. 
+
+### Question 8
+
+```{r Hyperparameters, echo = T}
+# Plot the complexity parameter
+plotcp(model)
+
+# Prune the tree based on the optimal cp value
+best_cp <- model$cptable[which.min(model$cptable[, "xerror"]), "CP"]
+
+# Prune the tree using the best cp value
+pruned_model <- prune(model, cp = best_cp)
+
+# Visualize the pruned tree
+rpart.plot(pruned_model, main = "Pruned Decision Tree", type = 1, extra = 1)
+
+# Generate predictions on the validation set with the pruned model
+pruned_predictions <- predict(pruned_model, validation_set, type = "class")
+pruned_conf_matrix <- confusionMatrix(pruned_predictions, validation_set$y)
+
+# Extract performance metrics for the pruned model
+pruned_accuracy <- pruned_conf_matrix$overall['Accuracy']
+# True Positive Rate
+pruned_sensitivity <- pruned_conf_matrix$byClass['Sensitivity']
+# True Negative Rate
+pruned_specificity <- pruned_conf_matrix$byClass['Specificity']
+```
+
+There were no identifiable changes between the pruned and unpruned trees, which indicates that the original cp was the best one that could be identified. The accuracy of the unpruned model was `r accuracy`, as compared to the pruned model's accuracy of `r pruned_accuracy`. The unpruned TPR was `r true_positive_rate` and the pruned TPR was `r pruned_sensitivity`, while the unpruned TNR was `r true_negative_rate` and the pruned TNR was `r pruned_specificity`.
+ 
+### Question 9
+ 
+```{r C50DecisionTree, echo = T}
+train_set$y <- as.factor(train_set$y)
+validation_set$y <- as.factor(validation_set$y)
+
+# Boosted with 20 trials
+c50.model <- C5.0(train_set[-17], train_set$y, trials = 20, rules = F)
+
+summary(c50.model)
+# summary(c50.model) # Too long to include in knitted file
+```
+
+### Question 10
+
+```{r C50ModelEvaluation}
+# Set a seed for reproducibility
+set.seed(123)
+
+c50_predictions <- predict(c50.model, validation_set[-17])
+c50_matrix <- confusionMatrix(c50_predictions, validation_set$y)
+print(c50_matrix)
+
+# Extract performance metrics for the pruned model
+c50_accuracy <- c50_matrix$overall['Accuracy']
+# True Positive Rate
+c50_sensitivity <- c50_matrix$byClass['Sensitivity']
+# True Negative Rate
+c50_specificity <- c50_matrix$byClass['Specificity']
+```
+
+The accuracy of the C50 model was `r c50_accuracy`, while the TPR was `r c50_sensitivity`, and the TNR was `r c50_specificity`. Within the binary classes (subscribed/did not subscribe), these statistics show that the model struggles to predict subscribers (minority class), but does not struggle to predict non-subscribers (majority class). The overall accuracy is high, meaning that many of the predictions made by the model are correct, which makes sense given that the model is very good at predicting the majority class (and there is much more data in that class so it drowns out the low performance on the minority class). 
+
+### Question 11
+
+The rpart model had a higher TPR and a lower TNR than the C50 model, which shows that it was even more skewed towards the accurate prediction of the majority class (no subscription). The overall accuracy of the rpart model was also a little lower. Given that pruning also did not improve the accuracy of the rpart model, I think that the C50 model is superior because it predicts the minority class more accurately, and predicts the majority class with good accuracy as well. In general, the rpart model is meant to be simpler and more interpretable, and allows the user to manually tune hyperparameters such as cp, which is useful for smaller datatsets but can become slow, cumbersome, or inaccurate with larger or more complicated data. The C50 algorithm is significantly more streamlined and automated, and supports boosting and more complex data, which leads to a simpler and more accurate decision tree output.
