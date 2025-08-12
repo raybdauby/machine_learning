@@ -1,0 +1,234 @@
+---
+title: "DA5030 Logistic Regression"
+author: "Dauby, Ray"
+date: "10-29-24"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r Packages, include = F}
+library(psych)
+library(caret)
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(klaR)
+```
+
+### Problem 2: 
+
+```{r LoadData, echo = T}
+# file path of the data file
+filepath <- "bank-term-deposit-marketing-full.csv"
+
+# Read the CSV file into a data frame
+df <- read.csv(filepath, sep = ";", header = T, stringsAsFactors = T)
+```
+
+### Problem 3: 
+
+```{r EDA, echo = T}
+# Examine dataset structure
+head(df, 5)
+summary(df)
+str(df)
+
+# Identify missing values in each column
+missing_values <- sapply(df, function(x) sum(is.na(x)))
+missing_values[missing_values > 0]
+
+# Check for infinite values
+infinite_values <- sapply(df, function(x) sum(is.infinite(x)))
+print(infinite_values[infinite_values > 0])
+
+# Histogram of log(age)
+# I asked ChatGPT to replicate my base R graphs in ggplot so that I did not have to convert them manually
+
+ggplot(df, aes(x = log(age))) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Log(Age)", x = "Log(Age)", y = "Frequency")
+
+# Histogram of log(balance)
+ggplot(df, aes(x = log(balance))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Log(Balance)", x = "Log(Balance)", y = "Frequency")
+
+# Histogram of sqrt(day)
+ggplot(df, aes(x = sqrt(day))) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Sqrt(Day)", x = "Sqrt(Day)", y = "Frequency")
+
+# Histogram of log(duration)
+ggplot(df, aes(x = log(duration))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Log(Duration)", x = "Log(Duration)", y = "Frequency")
+
+# Histogram of log(campaign)
+ggplot(df, aes(x = log(campaign))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Log(Campaign)", x = "Log(Campaign)", y = "Frequency")
+
+# Histogram of sqrt(pdays)
+ggplot(df, aes(x = sqrt(pdays))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Sqrt(Pdays)", x = "Sqrt(Pdays)", y = "Frequency")
+
+# Histogram of log(previous)
+ggplot(df, aes(x = log(previous))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Log(Previous)", x = "Log(Previous)", y = "Frequency")
+# Bar plot for job
+ggplot(df, aes(x = job)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Jobs", x = "Job", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Bar plot for marital status
+ggplot(df, aes(x = marital)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Marital Status", x = "Marital Status", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Bar plot for education
+ggplot(df, aes(x = education)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Education Levels", x = "Education", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Bar plot for default
+ggplot(df, aes(x = default)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Default Status", x = "Default", y = "Count")
+
+# Bar plot for housing
+ggplot(df, aes(x = housing)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Housing Loans", x = "Housing", y = "Count")
+
+# Bar plot for loan
+ggplot(df, aes(x = loan)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Personal Loans", x = "Loan", y = "Count")
+
+# Bar plot for contact
+ggplot(df, aes(x = contact)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Contact Communication Types", x = "Contact", y = "Count")
+
+# Bar plot for month
+ggplot(df, aes(x = month)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Months", x = "Month", y = "Count")
+
+# Bar plot for poutcome
+ggplot(df, aes(x = poutcome)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Previous Outcomes", x = "Poutcome", y = "Count")
+
+# Bar plot for y (target variable)
+ggplot(df, aes(x = y)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Count of Target Variable (y)", x = "y", y = "Count")
+
+# Remove rows where balance is less than zero
+df <- df %>% filter(balance >= 0)
+
+# Transform to approximately normal distributions
+df_transformed <- df %>%
+  mutate(
+    log_age = log(age + 1),
+    log_balance = log(balance + 1),
+    sqrt_day = sqrt(day),
+    log_duration = log(duration + 1),
+    log_campaign = log(campaign + 1),
+    sqrt_pdays = sqrt(pdays +1),
+    log_previous = log(previous + 1)
+  ) %>%
+  select(-age, -balance, -day, -duration, -campaign, -pdays, -previous) 
+
+# Pairs.panels took too long to run, but I used it to examine the colinearity
+# pairs.panels(df_transformed)
+```
+
+There are no rows with missing data, therefore they do not need to be handled.
+Logistic regression models are parametric, and therefore require that the data be normally distributed. I was unable to transform the "campaign" and "previous" columns to be gaussian, which may affect the model. I was also unable to handle the case where "balance" was below zero and also perform normalization, so I removed balances below zero. This may also affect the model. 
+The pairs.panel correlations showed some significant multicolinearity, indicating that we have redundancy between some predictive factors, which may increase the standard errors of the coefficients. 
+
+### Problem 4:
+
+```{r SplitData, echo = T}
+# Partition data on target variable y
+train_index <- createDataPartition(df_transformed$y, p = 0.8, list = FALSE)
+
+table(df_transformed$y)
+# Created test and train sets later due to feature normalization step
+```
+
+### Problem 5: 
+
+```{r EncodeCategorical, echo = T}
+# Convert target variable to binary (0 and 1)
+df_transformed$y <- as.factor(ifelse(df_transformed$y == "yes", 1, 0))
+
+set.seed(123)
+# Create WoE model for categorical variables
+woe_model <- woe(y ~ job+marital+education+default+housing+loan+contact+month+poutcome, data = df_transformed[train_index, ], zeroadj = 0.5)
+  
+# Apply WoE encoding to both training and validation sets
+df_transformed_woe <- predict(woe_model, newdata = df_transformed, type = "woe")
+
+# Omit any rows with NA values
+df_transformed_final <- na.omit(df_transformed_woe)
+
+# Split the data into training and validation sets
+train_set <- df_transformed_final[train_index, ]
+validation_set <- df_transformed_final[-train_index, ]
+```
+
+### Problem 6:
+
+```{r LogisticModel, echo = T}
+# Build the logistic regression model using all features
+logistic_model <- glm(formula = y ~ ., data = train_set, family = binomial)
+
+# View the summary of the model
+summary(logistic_model)
+```
+
+### Problem 7: 
+
+```{r SignificantModel, echo = T}
+# Build the logistic regression model using all features
+# removed sqrt_day, woe_default
+logistic_model <- glm(formula = y ~ log_age+log_balance+log_duration+log_campaign+sqrt_pdays+log_previous+woe_job+woe_marital+woe_education+woe_housing+woe_loan+woe_contact+woe_month+woe_poutcome, data = train_set, family = binomial)
+
+# View the summary of the model
+summary(logistic_model)
+```
+
+### Problem 8: 
+
+```{r EvaluateModel, echo = T}
+# Predict probabilities on the validation set
+predicted_probs <- predict(logistic_model, newdata = validation_set, type = "response")
+
+# Convert probabilities to binary outcomes using a threshold of 0.5
+predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
+
+# Create a confusion matrix
+confusion_matrix <- table(Predicted = predicted_classes, Actual = validation_set$y)
+print(confusion_matrix)
+
+# Calculate overall accuracy, true positive rate, and true negative rate
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+true_positive_rate <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+true_negative_rate <- confusion_matrix[1, 1] / sum(confusion_matrix[1, ])
+```
+The logistic regression model achieved an overall accuracy of `r round(accuracy, 2)` on the validation dataset. The true positive rate, which indicates the proportion of actual positives correctly identified, was `r round(true_positive_rate, 2)`. Conversely, the true negative rate, reflecting the proportion of actual negatives correctly identified, was `r round(true_negative_rate, 2)`.
+
+These results indicate the model's capacity to predict both classes. It is important to consider potential class imbalances in the dataset, which may lead to an inflated accuracy rate when the model performs well simply by predicting the majority class. The lower true positive rate (minority class) indicates the presence of class imbalance. 
+
+### Problem 9: 
+
+The pruned decision tree model from the previous assignment showed higher true positive rate (0.96) and lower true negative rate (0.48) with an overall higher accuracy (0.91), which is likely inflated due to class imbalance. The p-value eliminated logistic regression had higher accuracy with the minority class (true positive, `r round(true_positive_rate, 2)`), slightly lower accuracy with the majority class (true negative, `r round(true_negative_rate, 2)`), and a similar overall accuracy (`r round(accuracy, 2)`). These statistics indicate that the decision tree model more accurately predicts the minority class, which is the class of interest for our data, and is therefore the mroe useful model. These models are different because they take different approaches to modeling the data, and in this case the pruned decision tree model provided a more useful outcome. 
