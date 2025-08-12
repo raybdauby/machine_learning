@@ -1,0 +1,1800 @@
+---
+title: Predicting Heart Failure Survival on Clinical Data using 3 Machine Learning
+  Algorithms
+author: "Dauby, Ray"
+date: "Spring 2024"
+output:
+  html_document:
+    df_print: paged
+subtitle: DA 5030
+---
+***
+
+```{r Packages, include = F}
+# List of packages
+packages <- c(
+  "httr", "utils", "psych", "reshape2", "corrplot", "ggplot2", "gridExtra", 
+  "grid", "dplyr", "caret", "caretEnsemble", "crosstable", "randomForest", 
+  "pROC", "e1071", "xgboost", "glmnet", "RColorBrewer", "car", "knitr", 
+  "kableExtra", "flexdashboard"
+)
+
+# Install missing packages
+# Pulled from my practicum 1
+options(repos = c(CRAN = "https://cran.rstudio.com"))
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if (length(new_packages) > 0) {
+  install.packages(new_packages)
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+```
+
+## **I. Data Preparation**
+
+***
+
+#### Business Understanding
+
+The goal of this analysis is to develop a machine learning model that accurately predicts the survival of patients after heart failure based on clinical data. This will be useful in helping healthcare providers make informed decisions about treatment plans, allocate resources more effectively, and provide personalized care for individuals based on their likelihood of survival. By identifying key clinical factors that influence outcomes, the model can assist in early intervention, improve patient management, and enhance overall patient care and outcomes.
+
+#### Problem to be Solved:
+
+The problem to be solved is predicting whether a patient will survive or not after being diagnosed with heart failure, based on various clinical factors.
+
+***
+
+### **Part 1: Identify Data**
+
+```{r LoadData, echo = F}
+# Download ZIP file from the URL
+url <- "https://archive.ics.uci.edu/static/public/519/heart+failure+clinical+records.zip"
+file <- "heart_failure.zip"
+download.file(url, file)
+
+# Unzip the file to a directory
+unzip(file, exdir = "heart_failure")
+data_file <- file.path("heart_failure", "heart_failure_clinical_records_dataset.csv")
+
+# heart_df = original dataset
+# Read the data
+heart_df <- read.table(data_file, header = TRUE, sep = ",", stringsAsFactors = T)
+head(heart_df)
+```
+
+#### Data Understanding: 
+
+The dataset used in this analysis consists of medical records from 299 heart failure patients, including 105 women and 194 men, aged between 40 and 95 years. The data was collected from the Faisalabad Institute of Cardiology and the Allied Hospital in Faisalabad, Punjab, Pakistan, during April–December 2015. It includes both continuous and binary numeric variables, covering various clinical factors relevant to heart failure outcomes. The dataset has no missing values, and is publicly available from the UCI Machine Learning Repository.
+
+#### Data Source:
+
+Heart Failure Clinical Records [Dataset]. (2020). UCI Machine Learning Repository. https://doi.org/10.24432/C5Z89R.
+
+***
+
+### **Part 2: Data Exploration Plots**
+
+```{r ExploreData, echo = F, warnings = F}
+# Create Pairwise Plot to graph Continuous variables
+# Exclude binary columns
+binary_cols <- c("anaemia", "diabetes", "high_blood_pressure", "sex", "smoking", "DEATH_EVENT")
+pairs.panels(heart_df[, !(names(heart_df) %in% binary_cols)], 
+             main = "Pairwise Plot for Continuous Variables")
+
+# Create Boxplots to detect outliers in continuous variables
+continuous_cols <- setdiff(names(heart_df), binary_cols)
+plot_list <- list()
+for (col in continuous_cols) {
+  p <- ggplot(heart_df, aes(y = !!sym(col))) + 
+    geom_boxplot(fill = "skyblue", color = "black") + 
+    labs(title = paste(col), y = col) + 
+    theme_minimal() +
+    theme(axis.text.x = element_blank()) 
+  plot_list[[col]] <- p
+}
+grid.arrange(grobs = plot_list, ncol = 3, top = "Distribution of Continuous Variables (Boxplots)")
+
+# Create Bar Plot to graph binary variables
+# Melt the data to long format
+df_long <- melt(heart_df[, binary_cols], variable.name = "Variable", value.name = "Value", id.vars = NULL)
+ggplot(df_long, aes(x = factor(Value))) + 
+  geom_bar(fill = "skyblue", color = "black") + 
+  facet_wrap(~Variable) + 
+  labs(title = "Distribution of Binary Variables (Bar Plots)", x = "Value", y = "Count") + 
+  theme_minimal()
+
+# Spearman correlation matrix for continuous vars
+cor_matrix_spearman <- cor(heart_df[, continuous_cols], method = "spearman")
+cor_matrix <- cor(heart_df)
+cor_matrix_melted <- melt(cor_matrix)
+
+ggplot(cor_matrix_melted, aes(Var1, Var2, fill = value)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "blue", high = "hotpink", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  labs(title = "Correlation Heatmap")
+
+# Calculate VIF
+vif_model <- lm(DEATH_EVENT ~ ., data = heart_df)  # Fit a linear model
+kable(vif(vif_model), caption = "VIF Values for All Variables", digits = 3)
+```
+
+#### Data Exploration: 
+
+**Outliers Detection**
+
+I used boxplots to detect outliers in the continuous variables. These graphs revealed a few potential outliers in variables like creatinine_phosphokinase, serum_creatine, and platelets, where certain values significantly deviated from the rest of the data.
+
+**Distributions**
+
+To assess the distributions of both continuous and binary variables, I created histograms (within a Pairwise Plot) and bar plots. The histograms suggested that several variables, such as creatinine_phosphokinase and serum_creatine had skewed distributions, which may require transformation for better model performance. The binary variables were plotted as bar charts, revealing an imbalance in the target variable, DEATH_EVENT, as well as sex and smoking.
+
+**Correlations and Collinearity**
+
+I also evaluated the correlation between all of the variables using a Spearman correlation matrix. The results showed moderate correlations between certain variables, such as DEATH_EVENT and time, and sex and smoking. To assess these relationships further, I computed the Variance Inflation Factor (VIF) for each feature, which indicated that multicollinearity is not a significant concern, as all VIF values were below 1.5 and well within an acceptable range.
+
+***
+
+### **Part 3: Assess Data Quality (Outliers and Missing Values)**
+
+```{r DataQuality, echo = F}
+# Function to remove outliers
+# Pulled from my Practicum II
+remove_outliers_zscore <- function(df, threshold = 3) {
+  
+  # Create a copy of the data frame
+  df_no_outliers <- df
+  
+  # Create a data frame to store the number of outliers for each column
+  outlier_count <- data.frame(
+    Column = character(0),  # Column names
+    Outliers = numeric(0)   # Outlier counts
+  )
+  
+  # Loop through each numeric column
+  for (colname in colnames(df)) {
+    if (is.numeric(df[[colname]])) {
+      
+      # Calculate Z-scores for the column
+      mean_col <- mean(df[[colname]], na.rm = TRUE)
+      sd_col <- sd(df[[colname]], na.rm = TRUE)
+      z_scores <- (df[[colname]] - mean_col) / sd_col
+      
+      # Identify outliers (Z-scores greater than the threshold)
+      outliers <- abs(z_scores) > threshold
+      outlier_count <- rbind(outlier_count, data.frame(Column = colname, Outliers = sum(outliers, na.rm = TRUE)))
+      
+      # Remove rows where the Z-score is greater than the threshold
+      df_no_outliers <- df_no_outliers[!outliers, ]
+    }
+  }
+  kable(outlier_count, caption = "Outliers Count for Each Column", format = "markdown")
+  
+  # Return the data frame with no outliers
+  return(df_no_outliers)
+}
+
+# heart_1_df = outliers removed
+# Dataset without outliers
+heart_1_df <- remove_outliers_zscore(heart_df)
+heart_1_df <- na.omit(heart_1_df)
+```
+#### Data Preparation:
+
+**Missing Values**
+
+The dataset is known to have no missing values, which is ideal for model training and ensures that we do not need to impute any missing data. However, if there were to be missing values, I would consider using the mean for imputing continuous variables and the mode for categorical data. 
+
+**Imputation**
+
+While the dataset has no missing data, a comparison of imputed versus full data could be useful in understanding the impact of missing data imputation on model performance. If data were randomly removed and then imputed, the performance of the model could differ due to the introduction of bias or errors from the imputation process. For example, imputing with the mean or mode may reduce variance in the data, leading to underfitting, or removing outliers could eliminate valuable information that helps the model differentiate between normal and extreme cases. 
+
+**Outliers**
+
+I have opted not to remove outliers from the dataset I will use for model development. This decision stems from the fact that the data comes from a clinical context, and outliers could potentially represent extreme but medically relevant cases, such as rare conditions or severe health episodes that significantly affect the outcome. Removing these could skew the results and reduce the generalizability of the model. No cases will be removed from the analysis. 
+
+***
+
+### **Part 4: Assess Data Normality**
+
+```{r DataNormality, echo = F}
+# Function to test normality
+# Pulled from Practicum II
+test_normality <- function(df) {
+  non_normal_columns <- c()
+  # Loop through each column
+  for (colname in continuous_cols) {
+    # Shapiro-Wilk test
+    shapiro_result <- shapiro.test(df[[colname]])
+    # If p-value < 0.05, column not normally distributed
+    if (shapiro_result$p.value < 0.05) {
+      non_normal_columns <- c(non_normal_columns, colname)
+    }
+  }
+  return(non_normal_columns)
+}
+
+# Test normality of original data (with outliers)
+non_normal_columns <- test_normality(heart_df)
+kable(non_normal_columns, caption = "Abnormally Distributed Continuous Variables")
+
+histogram_list <- list()
+
+# Histogram of age
+hist_age <- ggplot(heart_df, aes(x = log(age))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "age")
+
+histogram_list[[1]] <- hist_age
+
+# Histogram of creatinine_phosphokinase
+hist_cp <- ggplot(heart_df, aes(x = log(creatinine_phosphokinase))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "creatinine_phosphokinase")
+
+histogram_list[[2]] <- hist_cp
+
+# Histogram of ejection_fraction
+hist_ef <- ggplot(heart_df, aes(x = log(ejection_fraction))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "ejection_fraction")
+
+histogram_list[[3]] <- hist_ef
+
+# Histogram of platelets
+hist_platelets <- ggplot(heart_df, aes(x = log(platelets))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "platelets")
+
+histogram_list[[4]] <- hist_platelets
+
+# Histogram of serum_creatinine
+hist_sc <- ggplot(heart_df, aes(x = 1/(serum_creatinine))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "serum_creatinine")
+
+histogram_list[[5]] <- hist_sc
+
+# Histogram of serum_sodium
+hist_ss <- ggplot(heart_df, aes(x = sqrt(serum_sodium))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "serum_sodium")
+
+histogram_list[[6]] <- hist_ss
+
+# Histogram of time
+hist_time <- ggplot(heart_df, aes(x = (sqrt(time)))) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black") +
+  labs(title = "time")
+
+histogram_list[[7]] <- hist_time
+
+# Arrange histograms in a grid with 3 columns
+grid.arrange(grobs = histogram_list, ncol = 4, top = "Transformed Histograms of Continuous Variables")
+
+# Update data to reflect transformations
+heart_2_df <- heart_1_df %>%
+  mutate(
+    age = log(age),
+    creatinine_phosphokinase = log(creatinine_phosphokinase),
+    ejection_fraction = log(ejection_fraction),
+    platelets = log(platelets),
+    serum_creatinine = 1/(serum_creatinine),
+    serum_sodium = sqrt(serum_sodium),
+    time = sqrt(time)
+  )
+
+# Update data to reflect transformations
+# Create additional dataset for testing
+heart_5_df <- heart_df %>%
+  mutate(
+    age = log(age),
+    creatinine_phosphokinase = log(creatinine_phosphokinase),
+    ejection_fraction = log(ejection_fraction),
+    platelets = log(platelets),
+    serum_creatinine = 1/(serum_creatinine),
+    serum_sodium = sqrt(serum_sodium),
+    time = sqrt(time)
+  )
+
+# Min-max noralize all of the data for SVM
+# Normalization Function
+min_max_norm <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# heart_2_df = outliers removed, gaussian normalized.
+# Remove any NAs produced by normalization
+heart_2_df <- na.omit(heart_2_df)
+
+# heart_5_df = outliers NOT removed, gaussian normalized.
+# Remove any NAs produced by normalization
+heart_5_df <- na.omit(heart_5_df)
+
+# heart_4_df = outliers removed, gaussian normalized, min-max normalized
+heart_4_df <- as.data.frame(lapply(heart_2_df, min_max_norm))
+heart_4_df <- na.omit(heart_4_df)
+
+# heart_6_df = min-max normalized original data
+heart_6_df <- as.data.frame(lapply(heart_df, min_max_norm))
+heart_6_df <- na.omit(heart_6_df)
+
+# heart_3_df = min-max normalized original data
+# Used in the data split 
+heart_3_df <- heart_6_df
+```
+
+#### Data Cleaning:
+
+**Distribution**
+
+To assess normality, I performed the Shapiro-Wilk test on each continuous feature and identified those that did not follow a normal distribution. Based on these findings, I applied appropriate transformations to make the distributions more symmetric and Gaussian-like where needed. Although my selected machine learning algorithms do not require data to follow a Gaussian distribution, I still wanted to explore whether normalizing the features would help with model convergence, particularly for algorithms that are sensitive to feature scaling, such as Support Vector Machines (SVM). 
+
+**Scaling**
+
+For normalization, I used Min-Max scaling, which rescales the data to a range between 0 and 1, ensuring that all features are on the same scale. This is useful when features have different units or scales, which could otherwise dominate the model’s learning process. Additionally, the transformed features will help reduce issues arising from extreme values or skewed distributions, allowing the algorithms to perform more effectively. Overall, the goal is to strike a balance between preserving the integrity of the data while optimizing it for model training.
+
+***
+
+### **Part 5: Feature Selection and Engineering**
+
+```{r FeatureSelection, echo = F}
+pca_result <- prcomp(heart_2_df[,-13], center = TRUE, scale. = TRUE)
+
+# Scree plot (variance explained by each principal component)
+screeplot(pca_result, type = "lines", main = "Variance explained by Principal Components (Scree Plot)")
+```
+
+#### Principal Component Analysis:
+
+I applied principal component analysis (PCA) to the dataset to explore the underlying structure of the data and potentially reduce dimensionality. However, the PCA results reveal that the first few principal components do not explain much of the variance in the data, as indicated by the low eigenvalues and variance explained by each component. This suggests that there may be multiple directions of variation in the dataset, or potentially noise, which makes it difficult to capture meaningful patterns in the reduced dimensions. Since there are only 12 features in the dataset, I have decided not to remove any features at this stage, as each feature could potentially contribute valuable information to the model, especially in a healthcare context where all variables may have clinical significance. It does not seem that new derived features will benefit the model.
+
+#### Data Quality Conclusion:
+
+- **No Missing Data** 
+- **Outliers Are Present but Justifiable:** There are some extreme values in the data, but because the data is clinical, it is likely that these outliers reflect real and significant health conditions. 
+- **Non-Normal Distributions:** Several continuous features in the dataset are not normally distributed. This was addressed by applying appropriate transformations. 
+- **Low Multicollinearity:** The correlation analysis revealed low levels of multicollinearity between features, which suggests that feature interactions are not causing significant issues in model performance. 
+- **Accurate Clinical Data:** No significant errors were found in the data regarding values outside of valid ranges for clinical variables.
+
+***
+
+### **Part 6: Testing and Training sets**
+
+```{r SplitData, echo = F}
+# Split data into training and testing sets
+set.seed(999)  # Set seed for reproducibility
+partition <- createDataPartition(heart_3_df$DEATH_EVENT, p = 0.70, list = FALSE)
+heart_3_df$DEATH_EVENT <- as.factor(heart_3_df$DEATH_EVENT)
+heart_3_df$DEATH_EVENT <- factor(heart_3_df$DEATH_EVENT, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Create training and testing data
+train_data <- heart_3_df[partition, ]
+test_data <- heart_3_df[-partition, ]
+
+# Assess the distribution of DEATH_EVENT in the training and test sets
+df3_death_event_dist <- crosstable(heart_3_df[, "DEATH_EVENT", drop = FALSE])
+train_death_event_dist <- crosstable(train_data[, "DEATH_EVENT", drop = FALSE])
+test_death_event_dist <- crosstable(test_data[, "DEATH_EVENT", drop = FALSE])
+
+kable(df3_death_event_dist, caption = "Distribution of Target Variable in Whole Dataset")
+kable(train_death_event_dist, caption = "Distribution of Target Variable in Training Dataset")
+kable(test_death_event_dist, caption = "Distribution of Target Variable in Testing Dataset")
+```
+
+#### Division Strategy:
+
+In this analysis, the dataset is split into training and test sets using a 70/30 ratio. The createDataPartition() function from the caret package ensures that the distribution of the binary target variable, DEATH_EVENT, is preserved in both the training and test datasets. By setting the seed for reproducibility, we ensure that the data split can be consistently reproduced across different runs. The splits are not identical in proportion due to the relatively small size of the dataset. 
+
+***
+
+## **II. Model Construction**
+
+***
+
+### **Part 7: Model Selection**
+
+#### Logistic Regression:
+
+Logistic Regression is a fundamental statistical model used for binary classification tasks. It works by modeling the probability of a binary outcome using a logistic function, where the input features are combined linearly, and the output is a value between 0 and 1. This model is appropriate for my dataset because it can easily handle numerical predictors and can provide probabilities for each class. 
+
+#### Random Forest:
+
+Random Forest is an ensemble learning method that builds multiple decision trees and combines their outputs to make a final prediction. Each tree is trained on a random subset of the data with random feature selection, which reduces overfitting and increases robustness. This method is appropriate for my dataset because it can handle complex, non-linear relationships between features and the target variable, without the need for explicit feature engineering. It is also less sensitive to outliers compared to other models. Additionally, Random Forests can rank feature importance, helping to identify which clinical factors are most predictive of patient survival.
+
+#### Support Vector Machine (SVM):
+
+SVM is a powerful classification algorithm that works by finding the hyperplane that best separates different classes in the feature space. SVM tries to maximize the margin between the closest points (support vectors) of each class, which helps improve generalization. This algorithm is appropriate for my dataset because it works well with high-dimensional data and can handle both linear and non-linear relationships. 
+
+***
+
+### **Part 8: Logistic Regression Models**
+
+#### Holdout Logistic Regression Model:
+
+The basic logistic regression model was trained using the original dataset without any advanced tuning. Predictions were made on the holdout test set, and performance metrics were computed. This model may underperform because it doesn’t leverage techniques like hyperparameter tuning, bagging, or boosting, which can help reduce overfitting and improve generalization.
+
+```{r LogisticModel-Holdout, include = F}
+###############
+# DEFINE MODEL
+##############
+set.seed(666)
+
+# Holdout (Original) Model
+logistic_model_holdout <- glm(formula = DEATH_EVENT ~ ., data = train_data, family = binomial)
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Predict on holdout test set
+holdout_predictions <- predict(logistic_model_holdout, newdata = test_data, type = "response")
+holdout_predictions_class <- ifelse(holdout_predictions > 0.5, "Yes", "No")
+
+# Evaluate model performance on holdout set
+confusion_matrix <- confusionMatrix(factor(holdout_predictions_class), factor(test_data$DEATH_EVENT))
+
+accuracy <- confusion_matrix$overall["Accuracy"]
+precision <- confusion_matrix$byClass["Precision"]
+recall <- confusion_matrix$byClass["Recall"]
+f1_score <- 2 * ((precision * recall) / (precision + recall))
+roc_curve <- roc(test_data$DEATH_EVENT, holdout_predictions)
+auc_value <- auc(roc_curve)
+
+##########################
+# EVALUATE WITH K_FOLD CV
+##########################
+
+# Cross-validation control
+train_control_cv <- trainControl(method = "cv", number = 10, classProbs = TRUE, 
+                                  summaryFunction = twoClassSummary)
+
+# Train the model using k-fold cv
+logistic_model_cv <- train(DEATH_EVENT ~ ., data = train_data, method = "glm", 
+                           family = binomial, trControl = train_control_cv, metric = "ROC")
+
+# Extract statistics
+cv_auc <- mean(logistic_model_cv$results$ROC)
+```
+
+#### Logistic Regression Hyperparameter Tuning:
+
+For this model, I used hyperparameter tuning to optimize the logistic regression model using the glmnet method. This model was trained with a grid search for the hyperparameters alpha and lambda. Tuning allows the model to find the best balance between bias and variance, improving its predictive capability. 
+
+```{r LogisticModel-Hyperparams, include=F}
+# Logistic Model Hyperparameter Tuning
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Encode data
+train_data$DEATH_EVENT <- as.factor(train_data$DEATH_EVENT)
+test_data$DEATH_EVENT <- as.factor(test_data$DEATH_EVENT)
+
+# Set up tuning grid 
+tune_grid <- expand.grid(alpha = seq(0, 1, length.out = 5), lambda = seq(0.001, 0.1, length.out = 5))
+
+# Define training control (used CV)
+train_control <- trainControl(method = "cv",
+                              number = 10,  
+                              summaryFunction = twoClassSummary,  
+                              classProbs = TRUE,  
+                              verboseIter = F) 
+
+# Train logistic regression model tuned hyperparameters
+logistic_model_tuned <- train(DEATH_EVENT ~ ., data = train_data, method = "glmnet", 
+                              tuneGrid = tune_grid, trControl = train_control, metric = "ROC")
+
+# Extract Hyperparameters
+best_alpha <- logistic_model_tuned$bestTune$alpha
+best_lambda <- logistic_model_tuned$bestTune$lambda
+
+log_hyperparameters <- data.frame(
+  Hyperparameter = c("Alpha", "Lambda"),
+  Value = c(best_alpha, best_lambda)
+)
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Predict on test set
+holdout_predictions_tuned <- predict(logistic_model_tuned, newdata = test_data, type = "prob")
+
+# Extract and classify the probabilities
+holdout_predictions_prob_tuned <- holdout_predictions_tuned[, "Yes"]
+holdout_predictions_class_tuned <- ifelse(holdout_predictions_prob_tuned > 0.5, "Yes", "No")
+
+# Convert to factor
+holdout_predictions_class_tuned <- as.factor(holdout_predictions_class_tuned)
+test_data$DEATH_EVENT <- as.factor(test_data$DEATH_EVENT)
+# Evaluate model performance on holdout set
+confusion_matrix_tuned <- confusionMatrix(holdout_predictions_class_tuned, test_data$DEATH_EVENT)
+
+accuracy_tuned <- confusion_matrix_tuned$overall["Accuracy"]
+precision_tuned <- confusion_matrix_tuned$byClass["Precision"]
+recall_tuned <- confusion_matrix_tuned$byClass["Recall"]
+f1_score_tuned <- 2 * ((precision_tuned * recall_tuned) / (precision_tuned + recall_tuned))
+roc_curve_tuned <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_tuned)
+auc_value_tuned <- auc(roc_curve_tuned)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Define training control for k-fold CV e
+train_control_cv <- trainControl(method = "cv", 
+                                  number = 10,  
+                                  summaryFunction = twoClassSummary, 
+                                  classProbs = TRUE, 
+                                  verboseIter = F) 
+
+# Train the final model with the best hyperparameters 
+final_logistic_model_cv <- train(DEATH_EVENT ~ ., 
+                                 data = train_data, 
+                                 method = "glmnet", 
+                                 tuneGrid = expand.grid(alpha = best_alpha, lambda = best_lambda), 
+                                 trControl = train_control_cv, 
+                                 metric = "ROC")
+
+cv_results <- final_logistic_model_cv$resample
+mean_auc <- mean(cv_results$ROC)
+```
+```{r LogStats, echo = F}
+kable(log_hyperparameters, caption = "Best Hyperparameters for Logistic Regression Model", format = "markdown", digits = 3)
+```
+
+#### Bagged Logistic Regression Model:
+
+In the bagging model, I used bootstrapping to create multiple versions of the logistic regression model, each trained on different random samples of the data. Bagging reduces variance by averaging the predictions from multiple models, which helps improve the robustness of the model and avoid overfitting. 
+
+```{r LogisticModel-Bagged, include = F}
+# Bagged Homogenous Model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Training control for bagging (bootstrapping) 
+train_control_bagging <- trainControl(method = "boot", number = 100, classProbs = TRUE, 
+                                      summaryFunction = twoClassSummary)
+
+# Train bagged model using the best hyperparameters
+logistic_model_bagging_optimized <- train(DEATH_EVENT ~ ., data = train_data, method = "glmnet",
+                                          tuneGrid = expand.grid(alpha = best_alpha, 
+                                                                lambda = best_lambda),
+                                          trControl = train_control_bagging, metric = "ROC")
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Extract probabilities and predict class
+holdout_predictions_bagging <- predict(logistic_model_bagging_optimized, newdata = test_data, type = "prob")
+holdout_predictions_prob_bagging <- holdout_predictions_bagging[, "Yes"]
+holdout_predictions_class_bagging <- ifelse(holdout_predictions_prob_bagging > 0.5, "Yes", "No")
+
+# Confusion Matrix 
+confusion_matrix_bagging <- confusionMatrix(factor(holdout_predictions_class_bagging), factor(test_data$DEATH_EVENT))
+
+# Calculate stats 
+accuracy_bagging <- confusion_matrix_bagging$overall["Accuracy"]
+precision_bagging <- confusion_matrix_bagging$byClass["Precision"]
+recall_bagging <- confusion_matrix_bagging$byClass["Recall"]
+f1_bagging <- 2 * ((precision_bagging * recall_bagging) / (precision_bagging + recall_bagging))
+roc_curve_bagging <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_bagging)
+auc_bagging <- auc(roc_curve_bagging)
+
+log_bagging_results <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F1 Score", "AUC"),
+  Value = c(accuracy_bagging, precision_bagging, recall_bagging, f1_bagging, auc_bagging)
+)
+
+kable(log_bagging_results, caption = "Bagged Logistic Model Holdout Results", format = "markdown", digits = 3)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Set up training control for 10-fold CV 
+train_control_bagging_cv <- trainControl(method = "cv", 
+                                          number = 10, 
+                                          classProbs = TRUE,
+                                          summaryFunction = twoClassSummary, 
+                                          verboseIter = F) 
+
+# Train the bagged logistic regression model using the tuned hyperparameters
+logistic_model_bagging_optimized_cv <- train(DEATH_EVENT ~ ., data = train_data, 
+                                             method = "glmnet",
+                                             tuneGrid = expand.grid(alpha = logistic_model_tuned$bestTune$alpha, 
+                                                                   lambda = logistic_model_tuned$bestTune$lambda),
+                                             trControl = train_control_bagging_cv, 
+                                             metric = "ROC")
+
+# Extract the results from the cross-validation
+cv_results_bagging <- logistic_model_bagging_optimized_cv$results
+mean_auc_bagging <- mean(cv_results_bagging$ROC)
+```
+
+#### Boosted Logistic Regression Model:
+
+The boosted logistic regression model was created using XGBoost, an implementation of gradient boosting. Boosting aims to reduce bias by focusing on the errors made by the previous models and iteratively correcting them. 
+
+```{r LogisticModel-Boosted, include = F, warnings = F}
+# Boosting Model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Set up trainControl for cross-validation
+train_control <- trainControl(method = "none", 
+                               classProbs = TRUE,  # Need class probabilities for ROC/AUC
+                               summaryFunction = twoClassSummary, 
+                               savePredictions = "final",
+                               verboseIter = F)
+
+# Define hyperparameter grid for tuning
+# Extracted best hyperparameters from grid search and used them in training 
+# Was too computationally intensive to run the grid search every time
+tune_grid <- expand.grid(
+  nrounds = 50,     
+  eta = 0.01,     
+  max_depth = 3,      
+  gamma = 0,            
+  colsample_bytree = 0.7,   
+  min_child_weight = 1,      
+  subsample = 0.7        
+)
+
+# Train the XGBoost model using caret
+xgb_model <- train(DEATH_EVENT ~ ., 
+                         data = train_data, 
+                         method = "xgbTree", 
+                         tuneGrid = tune_grid, 
+                         metric = "ROC",  
+                         trControl = train_control)
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on the test set
+xgb_predictions <- predict(xgb_model, newdata = test_data, type = "prob")
+xgb_predictions_yes <- xgb_predictions[, "Yes"]
+xgb_predictions_class <- as.factor(ifelse(xgb_predictions_yes > 0.5, "Yes", "No"))
+xgb_predictions_class_num <- as.numeric(ifelse(xgb_predictions_yes > 0.5, 1, 0))
+
+# Evaluate performance
+confusion_matrix_xgb <- confusionMatrix(xgb_predictions_class, as.factor(test_data$DEATH_EVENT))
+
+# AUC for XGBoost
+test_data$DEATH_EVENT <- as.numeric(ifelse(test_data$DEATH_EVENT == "Yes", 1, 0))
+
+# Calculate metrics
+accuracy_xgb <- confusion_matrix_xgb$overall["Accuracy"]
+precision_xgb <- confusion_matrix_xgb$byClass["Precision"]
+recall_xgb <- confusion_matrix_xgb$byClass["Recall"]
+f1_xgb <- 2 * ((precision_xgb * recall_xgb) / (precision_xgb + recall_xgb))
+roc_curve_xgb <- roc(test_data$DEATH_EVENT, xgb_predictions_class_num)
+auc_xgb <- auc(roc_curve_xgb)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# train_data$DEATH_EVENT <- as.factor(ifelse(train_data$DEATH_EVENT == 1, "Yes", "No"))
+test_data$DEATH_EVENT <- as.factor(ifelse(test_data$DEATH_EVENT == 1, "Yes", "No"))
+
+# Boosting Model with K-Fold Cross-Validation
+train_control_boosting_cv <- trainControl(method = "cv", 
+                                           number = 10, 
+                                           classProbs = TRUE, 
+                                           summaryFunction = twoClassSummary, 
+                                           verboseIter = F) 
+
+# Train XGBoost model with CV
+xgb_model_cv <- train(DEATH_EVENT ~ ., data = train_data, eval_metric = "auc",
+                      method = "xgbTree", 
+                      verbosity = 0,
+                      trControl = train_control_boosting_cv)
+
+cv_results_xgb <- xgb_model_cv$results
+mean_auc_xgb <- mean(cv_results_xgb$ROC)
+```
+
+#### Logistic Regression Models Summary Statistics:
+
+```{r LogisticModel-Stats, echo = F}
+# Comparison of Models
+
+# Extract sensitivity and specificity for each model
+sensitivity <- c(
+  confusion_matrix$byClass["Sensitivity"], 
+  confusion_matrix_tuned$byClass["Sensitivity"],
+  confusion_matrix_bagging$byClass["Sensitivity"], 
+  confusion_matrix_xgb$byClass["Sensitivity"]
+)
+
+specificity <- c(
+  confusion_matrix$byClass["Specificity"], 
+  confusion_matrix_tuned$byClass["Specificity"],
+  confusion_matrix_bagging$byClass["Specificity"], 
+  confusion_matrix_xgb$byClass["Specificity"]
+)
+
+final_results <- data.frame(
+  Model = c("Logistic Regression (Original)", 
+            "Logistic Regression (Tuned)", 
+            "Logistic Regression (Bagging)", 
+            "Logistic Regression (Boosting)"),
+  
+  Accuracy = c(accuracy, accuracy_tuned, accuracy_bagging, accuracy_xgb),
+  Precision = c(precision, precision_tuned, precision_bagging, precision_xgb),
+  Recall = c(recall, recall_tuned, recall_bagging, recall_xgb),
+  F1_Score = c(f1_score, f1_score_tuned, f1_bagging, f1_xgb),
+  TPR = sensitivity,
+  TNR = specificity,
+  Holdout_AUC = c(auc_value, auc_value_tuned, auc_bagging, auc_xgb),
+  CV_AUC = c(cv_auc, mean_auc, mean_auc_bagging, mean_auc_xgb)
+)
+
+kable(final_results, caption = "Comparison of Logistic Regression Models with Key Metrics", format = "markdown", digits = 3)
+```
+
+#### Logistic Model Evaluation:
+
+A comparison of the four logistic regression models reveals that the Tuned Logistic Regression model is the best overall, achieving the highest CV AUC of `r round(mean_auc, 3)`, indicating strong generalization across the training set. It is important to note that for all models in this analysis, the "Positive" case is when the DEATH_EVENT is "No". While it sacrifices some accuracy (`r round(accuracy_tuned, 3)`) and True Negative Rate (TNR) (`r round(specificity[2], 3)`) in favor of a significantly improved recall (`r round(recall_tuned, 3)`), it delivers the highest F1 score (`r round(f1_score_tuned, 3)`), making it the most balanced and effective at identifying positive cases. The Original Logistic Regression model offers solid performance with a high accuracy (r round(accuracy, 3)) but falls short in TNR and AUC. The Bagging model mirrors the tuned model in recall (`r round(recall_bagging, 3)`) and F1 score (`r round(f1_bagging, 3)`) but has slightly lower CV AUC (`r round(mean_auc_bagging, 3)`), while the Boosted Logistic Regression model, though performing well in terms of accuracy (`r round(accuracy_xgb, 3)`) and precision (`r round(precision_xgb, 3)`), has the lowest Holdout AUC (`r round(auc_xgb, 3)`), indicating it may not generalize as effectively as the tuned model.
+
+***
+
+### **Part 9: Random Forest Models**
+
+#### Original Random Forest Model:
+
+The initial Random Forest model was trained using the original dataset, applying 500 trees and allowing the model to learn from multiple decision trees, each trained on a different subset of the data. This form of ensemble learning reduces overfitting by averaging predictions from multiple models, making the overall predictions more robust and generalized.
+
+```{r RandomForestModel, include= F}
+# Original Random Forest model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+train_data$DEATH_EVENT <- as.factor(train_data$DEATH_EVENT)
+rf_model <- randomForest(DEATH_EVENT ~ ., data = train_data, importance = TRUE, ntree = 500)
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on the test data
+holdout_predictions_rf <- predict(rf_model, newdata = test_data, type = "prob")
+holdout_predictions_prob_rf <- holdout_predictions_rf[, "Yes"]
+holdout_predictions_class_rf <- ifelse(holdout_predictions_prob_rf > 0.5, "Yes", "No")
+
+# Factors with the same levels
+holdout_predictions_class_rf <- factor(holdout_predictions_class_rf, levels = c("No", "Yes"))
+test_data$DEATH_EVENT <- factor(test_data$DEATH_EVENT, levels = c("No", "Yes"))
+
+# Confusion Matrix
+confusion_matrix_rf <- confusionMatrix(holdout_predictions_class_rf, test_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_rf <- confusion_matrix_rf$overall["Accuracy"]
+precision_rf <- confusion_matrix_rf$byClass["Precision"]
+recall_rf <- confusion_matrix_rf$byClass["Recall"]
+tpr_rf <- confusion_matrix_rf$byClass["Sensitivity"] 
+tnr_rf <- confusion_matrix_rf$byClass["Specificity"]  
+f1_rf <- 2 * ((precision_rf * recall_rf) / (precision_rf + recall_rf))
+roc_curve_rf <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_rf)
+auc_rf <- auc(roc_curve_rf)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Set up k-fold cross-validation using caret
+train_control_rf_cv <- trainControl(method = "cv", number = 10, 
+                                     classProbs = TRUE, summaryFunction = twoClassSummary, 
+                                     verboseIter = F)
+
+# Train the Random Forest model with k-fold cross-validation
+rf_model_cv <- train(DEATH_EVENT ~ ., data = train_data, method = "rf", 
+                     trControl = train_control_rf_cv, metric = "ROC", 
+                     tuneGrid = expand.grid(mtry = 1))
+
+mean_auc_rf <- mean(rf_model_cv$results$ROC)
+```
+
+#### Random Forest Hyperparameter Tuning:
+
+For the tuned Random Forest model, hyperparameter tuning was performed to optimize the mtry parameter, which determines the number of features considered for each split in the decision trees. The best mtry value was identified through cross-validation.
+
+```{r RandomForestModel-Hyperparams, include = F}
+# Hyperparameter tuning for Random Forest
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(999)
+
+train_control_rf <- trainControl(method = "cv", number = 12, classProbs = TRUE, savePredictions = "final", summaryFunction = twoClassSummary)
+
+# Tuning grid 
+# mtry = number of variables randomly sampled at each split
+tune_grid_rf <- expand.grid(mtry = c(1:12))
+
+# Train RF model with hyperparameter mtry
+rf_model_tuned <- train(DEATH_EVENT ~ ., data = train_data, method = "rf", tuneGrid = tune_grid_rf, 
+                        trControl = train_control_rf, metric = "ROC")
+
+best_hyperparams <- data.frame(
+  Hyperparameter = "Best mtry",
+  Value = rf_model_tuned$bestTune$mtry
+)
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on test data
+holdout_predictions_rf_tuned <- predict(rf_model_tuned, newdata = test_data, type = "prob")
+holdout_predictions_prob_rf_tuned <- holdout_predictions_rf_tuned[, "Yes"]
+holdout_predictions_class_rf_tuned <- ifelse(holdout_predictions_prob_rf_tuned > 0.5, "Yes", "No")
+
+# Factors with the same levels
+holdout_predictions_class_rf_tuned <- factor(holdout_predictions_class_rf_tuned, levels = c("No", "Yes"))
+test_data$DEATH_EVENT <- factor(test_data$DEATH_EVENT, levels = c("No", "Yes"))
+
+# Confusion Matrix
+confusion_matrix_rf_tuned <- confusionMatrix(holdout_predictions_class_rf_tuned, test_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_rf_tuned <- confusion_matrix_rf_tuned$overall["Accuracy"]
+precision_rf_tuned <- confusion_matrix_rf_tuned$byClass["Precision"]
+recall_rf_tuned <- confusion_matrix_rf_tuned$byClass["Recall"]
+f1_rf_tuned <- 2 * ((precision_rf_tuned * recall_rf_tuned) / (precision_rf_tuned + recall_rf_tuned))
+roc_curve_rf_tuned <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_rf_tuned)
+auc_rf_tuned <- auc(roc_curve_rf_tuned)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# k-fold cross-validation 
+train_control_rf_cv <- trainControl(method = "cv", number = 10, 
+                                     classProbs = TRUE, summaryFunction = twoClassSummary, 
+                                     verboseIter = F)
+
+# Train model 
+rf_model_cv <- train(DEATH_EVENT ~ ., data = train_data, method = "rf", 
+                     trControl = train_control_rf_cv, metric = "ROC", 
+                     tuneGrid = expand.grid(mtry = rf_model_tuned$bestTune$mtry))
+
+# Extract AUC
+best_auc_rf <- mean(rf_model_cv$results$ROC)
+
+# Extract feature importance from the tuned Random Forest model
+feature_importance <- randomForest::importance(rf_model_tuned$finalModel)
+
+# Convert to a data frame for easier handling
+feature_importance_df <- data.frame(
+  Feature = rownames(feature_importance),
+  Importance = feature_importance[, 1]
+)
+
+# Sort features by importance in decreasing order
+feature_importance_df <- feature_importance_df[order(-feature_importance_df$Importance),]
+```
+
+```{r RF_Hyperparams_Display, echo = F}
+kable(best_hyperparams, caption = "Best Hyperparameters for Random Forest", format = "markdown", digits = 3)
+```
+
+#### Bagged Random Forest Model:
+
+While bagging (Bootstrap Aggregating) is a core component of Random Forest, it is not necessary to apply bagging explicitly in this context. Random Forest inherently uses bagging, where each tree in the forest is trained on a random subset of the data. As a result, applying additional bagging methods would be redundant.
+
+#### Boosted Random Forest Model:
+
+Boosting involves sequentially training models where each new model attempts to correct the errors made by the previous model. However, boosting is not typically applied to Random Forest because it is a parallel model. Unlike boosting algorithms like XGBoost, Random Forest models work in parallel (each tree is built independently), and boosting methods (which rely on the sequential training of models) are not directly compatible with Random Forests. Additionally, the combination of bagging and boosting methods in one model (like trying to "boost" a Random Forest) is unnecessary and could lead to inefficiencies.
+
+#### Random Forest Model Statistics:
+
+```{r RandomForestModel-Stats, echo = F}
+# Comparison of Models
+# Extract sensitivity (TPR) and specificity (TNR) for each Random Forest model
+sensitivity_rf <- c(
+  confusion_matrix_rf$byClass["Sensitivity"], 
+  confusion_matrix_rf_tuned$byClass["Sensitivity"]
+)
+
+specificity_rf <- c(
+  confusion_matrix_rf$byClass["Specificity"], 
+  confusion_matrix_rf_tuned$byClass["Specificity"]
+)
+
+# Combine all the metrics into a final results data frame for Random Forest models
+final_rf_results <- data.frame(
+  Model = c("Original Random Forest", 
+            "Tuned Random Forest"),
+  
+  Accuracy = c(accuracy_rf, accuracy_rf_tuned),
+  Precision = c(precision_rf, precision_rf_tuned),
+  Recall = c(recall_rf, recall_rf_tuned),
+  F1_Score = c(f1_rf, f1_rf_tuned),
+  TPR = sensitivity_rf, 
+  TNR = specificity_rf, 
+  Holdout_AUC = c(auc_rf, auc_rf_tuned),
+  CV_AUC = c(mean_auc_rf, best_auc_rf)
+)
+
+# Display the final results table for Random Forest 
+kable(final_rf_results, caption = "Comparison of Random Forest Model Statistics", format = "markdown", digits = 3)
+kable(feature_importance_df, caption = "Feature Importance for Random Forest Model", format = "markdown", digits = 3)
+```
+
+#### Random Forest Model Evaluation: 
+
+The comparison between the Original and Tuned Random Forest models reveals a significant improvement in performance after hyperparameter tuning. The Tuned Random Forest model, with an optimized mtry value of `r rf_model_tuned$bestTune$mtry`, achieves a higher accuracy (`r round(accuracy_rf_tuned, 3)`) and F1 score (`r round(f1_rf_tuned, 3)`) compared to the Original model, indicating better overall balance between precision and recall. Notably, the Tuned model excels in recall (`r round(recall_rf_tuned, 3)`) with a significant increase in sensitivity (TPR) to `r round(sensitivity_rf[2], 3)`, making it more effective at identifying positive cases. Despite these gains, the Original Random Forest model still performs well, with an accuracy of `r round(accuracy_rf, 3)` and a respectable TNR (specificity) of `r round(specificity_rf[1], 3)`. In terms of generalization, both models perform well, with the Tuned Random Forest model achieving the highest CV AUC of `r round(best_auc_rf, 3)`, indicating better cross-validated performance. The Original Random Forest model has an AUC of `r round(auc_rf, 3)`, reflecting solid performance but not quite matching the Tuned model's enhanced generalization capability.
+
+***
+
+### **Part 10: Support Vector Machine Models**
+
+#### Original SVM Model:
+
+This is the baseline SVM model. It uses the linear kernel by default, which assumes that the data can be separated by a straight line (or hyperplane in higher dimensions). The model is trained on the training dataset to predict whether the DEATH_EVENT is "Yes" or "No" based on the features. The cost parameter (C) is set to 1, which strikes a balance between achieving a low error on training data and maintaining the model’s ability to generalize to new data.
+
+```{r SVM, include = F}
+# Original SVM model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Train the SVM model 
+train_data$DEATH_EVENT <- ifelse(train_data$DEATH_EVENT == "Yes", 1, 0)
+svm_model <- svm(DEATH_EVENT ~ ., data = train_data, kernel = "linear", cost = 1, scale = TRUE, probability = TRUE)
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Predictions on the test data
+holdout_predictions_prob_svm <- predict(svm_model, newdata = test_data, type = "prob")
+holdout_predictions_prob_svm_yes <- ifelse(holdout_predictions_prob_svm > 0.5, 1, 0)
+holdout_predictions_svm_class <- ifelse(holdout_predictions_prob_svm_yes == 1, "Yes", "No")
+holdout_predictions_svm_class <- as.factor(holdout_predictions_svm_class)
+
+# Confusion Matrix
+confusion_matrix_svm <- confusionMatrix(holdout_predictions_svm_class, test_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_svm <- confusion_matrix_svm$overall["Accuracy"]
+precision_svm <- confusion_matrix_svm$byClass["Precision"]
+recall_svm <- confusion_matrix_svm$byClass["Recall"]
+f1_svm <- 2 * ((precision_svm * recall_svm) / (precision_svm + recall_svm))
+roc_curve_svm <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_svm_yes)
+auc_svm <- auc(roc_curve_svm)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+train_data$DEATH_EVENT <- as.factor(ifelse(train_data$DEATH_EVENT == 1, "Yes", "No"))
+
+# Set up k-fold cross-validation
+train_control_svm_cv <- trainControl(method = "cv", 
+                                      number = 10, 
+                                      classProbs = TRUE, 
+                                      summaryFunction = twoClassSummary, 
+                                      verboseIter = F)
+
+# Train SVM model using k-fold cross-validation
+svm_model_cv <- train(DEATH_EVENT ~ ., 
+                      data = train_data, 
+                      method = "svmRadial", 
+                      trControl = train_control_svm_cv, 
+                      metric = "ROC",  
+                      tuneLength = 5) 
+
+cv_results_svm <- svm_model_cv$results
+mean_auc_svm <- mean(cv_results_svm$ROC)
+```
+
+#### SVM Hyperparameter Tuning:
+
+The tuned SVM model improves upon the original by optimizing its hyperparameters, specifically the cost parameter (C). In this case, we use the Radial basis function (RBF) kernel (svmRadial), which is a non-linear kernel that allows the model to capture more complex decision boundaries between the classes.
+
+```{r SVM-Hyperparams, include = F}
+# Hyperparameter tuning for SVM 
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+train_control_svm <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary, verboseIter = F)
+
+# Tuning grid for SVM (C and sigma)
+tune_grid_svm <- expand.grid(C = 2^(-5:5), sigma = 2^(-5:5))
+
+suppressMessages({
+  # Train the model
+  svm_model_tuned <- train(DEATH_EVENT ~ ., data = train_data, method = "svmRadial", 
+                         tuneGrid = tune_grid_svm, trControl = train_control_svm, metric = "ROC")
+})
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Predictions on the test data
+holdout_predictions_svm_tuned <- predict(svm_model_tuned, newdata = test_data, type = "prob")
+holdout_predictions_prob_svm_tuned_yes <- holdout_predictions_svm_tuned[, "Yes"]
+holdout_predictions_prob_svm_tuned_yes <- as.factor((ifelse(holdout_predictions_prob_svm_tuned_yes > 0.5, "Yes", "No")))
+
+# Confusion Matrix 
+confusion_matrix_svm_tuned <- confusionMatrix(holdout_predictions_prob_svm_tuned_yes, test_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_svm_tuned <- confusion_matrix_svm_tuned$overall["Accuracy"]
+precision_svm_tuned <- confusion_matrix_svm_tuned$byClass["Precision"]
+recall_svm_tuned <- confusion_matrix_svm_tuned$byClass["Recall"]
+f1_svm_tuned <- 2 * ((precision_svm_tuned * recall_svm_tuned) / (precision_svm_tuned + recall_svm_tuned))
+holdout_predictions_prob_svm_tuned <- predict(svm_model_tuned, newdata = test_data, type = "prob")[, "Yes"]
+roc_curve_svm_tuned <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_svm_tuned)
+auc_svm_tuned <- auc(roc_curve_svm_tuned)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Set up k-fold cross-validation
+train_control_svm_cv <- trainControl(method = "cv", 
+                                      number = 10, 
+                                      classProbs = TRUE, 
+                                      summaryFunction = twoClassSummary, 
+                                      verboseIter = F)
+
+suppressMessages({
+  # Train the tuned SVM model using k-fold cross-validation
+  svm_model_tuned_cv <- train(DEATH_EVENT ~ ., 
+                            data = train_data, 
+                            method = "svmRadial", 
+                            trControl = train_control_svm_cv, 
+                            tuneGrid = tune_grid_svm, 
+                            metric = "ROC") 
+})
+
+# Extract the results from cross-validation
+cv_results_svm <- svm_model_tuned_cv$results
+mean_auc_svm_cv <- mean(cv_results_svm$ROC)
+```
+
+```{r SVM-Output, echo = F}
+# Add optimal params to df
+svm_hyperparameters <- data.frame(
+  Hyperparameter = c("Best C", "Best Sigma"),
+  Value = c(svm_model_tuned$bestTune$C, svm_model_tuned$bestTune$sigma)
+)
+
+kable(svm_hyperparameters, caption = "SVM Hyperparameters", format = "markdown", digits = 3)
+```
+
+#### Bagged SVM Model:
+
+Bagging (Bootstrap Aggregating) is an ensemble learning technique where multiple models are trained on different subsets of the training data and then combined (usually by averaging or voting) to improve the model’s performance. The idea is that by training multiple models on random subsets of the data (with replacement), the model reduces variance and becomes more robust. 
+
+In the case of bagging with SVM, we apply the tuned SVM model from the previous step, but we train multiple versions of the model on bootstrapped subsets of the training data. Bagging helps to reduce overfitting by decreasing the model’s sensitivity to small fluctuations in the training data. The final prediction is made by aggregating the predictions from all the individual SVM models.
+
+```{r SVM-Bagged, include = F}
+# Bagged SVM Model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Training control for bagging (bootstrapping) 
+train_control_bagging_svm <- trainControl(method = "boot", number = 100, classProbs = TRUE, 
+                                           summaryFunction = twoClassSummary, verboseIter = F)
+
+# Train model with hyperparameter tuning
+svm_model_bagging_optimized <- train(DEATH_EVENT ~ ., data = train_data, method = "svmRadial",
+                                     tuneGrid = expand.grid(C = svm_model_tuned$bestTune$C, 
+                                                           sigma = svm_model_tuned$bestTune$sigma),
+                                     trControl = train_control_bagging_svm, metric = "ROC")
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on test data
+holdout_predictions_bagging_svm <- predict(svm_model_bagging_optimized, newdata = test_data, type = "prob")
+holdout_predictions_prob_bagging_svm <- holdout_predictions_bagging_svm[, "Yes"]
+holdout_predictions_class_bagging_svm <- ifelse(holdout_predictions_prob_bagging_svm > 0.5, "Yes", "No")
+
+# Confusion Matrix
+confusion_matrix_bagging_svm <- confusionMatrix(factor(holdout_predictions_class_bagging_svm), factor(test_data$DEATH_EVENT))
+
+# Evaluation Metrics
+accuracy_bagging_svm <- confusion_matrix_bagging_svm$overall["Accuracy"]
+precision_bagging_svm <- confusion_matrix_bagging_svm$byClass["Precision"]
+recall_bagging_svm <- confusion_matrix_bagging_svm$byClass["Recall"]
+f1_bagging_svm <- 2 * ((precision_bagging_svm * recall_bagging_svm) / (precision_bagging_svm + recall_bagging_svm))
+roc_curve_bagging_svm <- roc(test_data$DEATH_EVENT, holdout_predictions_prob_bagging_svm)
+auc_bagging_svm <- auc(roc_curve_bagging_svm)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Bagged SVM Model with K-Fold CV
+train_control_bagging_cv_svm <- trainControl(method = "cv", 
+                                              number = 10, 
+                                              classProbs = TRUE, 
+                                              summaryFunction = twoClassSummary, 
+                                              verboseIter = F)  
+
+# Train bagged SVM model with cross-validation
+svm_model_bagging_optimized_cv <- train(DEATH_EVENT ~ ., data = train_data, 
+                                        method = "svmRadial",
+                                        tuneGrid = expand.grid(C = svm_model_tuned$bestTune$C, 
+                                                              sigma = svm_model_tuned$bestTune$sigma),
+                                        trControl = train_control_bagging_cv_svm, 
+                                        metric = "ROC")
+
+# Performance Metrics 
+cv_results_bagging_svm <- svm_model_bagging_optimized_cv$results
+mean_auc_bagging_svm <- mean(cv_results_bagging_svm$ROC)
+```
+
+#### Boosted SVM Model:
+
+Boosting is another ensemble learning technique that combines the predictions of several base models (in this case, SVM models) in a sequential manner. The key idea behind boosting is that each new model focuses on the mistakes (misclassifications) made by the previous models. Boosting corrects errors iteratively, resulting in a more accurate and robust model.
+
+In this case, the boosting algorithm used is XGBoost, a highly efficient and powerful gradient boosting method that combines multiple weak learners (SVMs in this case) into a strong learner. The XGBoost model applies a series of SVMs sequentially, where each new SVM model aims to correct the errors of the previous one.
+
+```{r SVM-Boosted, include = F}
+# Boosted SVM Model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Training control
+train_control_svm <- trainControl(
+  method = "none", 
+  savePredictions = "final",   
+  classProbs = TRUE,         
+  summaryFunction = twoClassSummary,
+  verboseIter = TRUE             
+)
+
+# Define the tuning grid for XGBoost
+# Identified optimal values and hard-coded them to reduce run time
+tune_grid_svm <- expand.grid(
+  nrounds = 100,         
+  eta = 0.1,        
+  max_depth = 6,   
+  gamma = 0.1,        
+  colsample_bytree = 0.8, 
+  min_child_weight = 1,  
+  subsample = 0.8   
+)
+
+# Train the model 
+xgb_model_svm_caret <- train(
+  DEATH_EVENT ~ ., 
+  data = train_data,
+  method = "xgbTree",        
+  trControl = train_control_svm,
+  tuneGrid = tune_grid_svm, 
+  metric = "ROC"             
+)
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on test set
+xgb_predictions_svm <- predict(xgb_model_svm_caret, newdata = test_data, type = "prob")
+xgb_predictions_svm_yes <- xgb_predictions_svm[, "Yes"]
+xgb_predictions_class_svm <- as.factor(ifelse(xgb_predictions_svm_yes > 0.5, "Yes", "No"))
+xgb_predictions_class_svm_num <- as.numeric(ifelse(xgb_predictions_svm_yes > 0.5, 1, 0))
+
+# Confusion Matrix 
+confusion_matrix_xgb_svm <- confusionMatrix(factor(xgb_predictions_class_svm), factor(test_data$DEATH_EVENT))
+
+# AUC for XGBoost
+test_data$DEATH_EVENT <- as.numeric(ifelse(test_data$DEATH_EVENT == "Yes", 1, 0))
+
+# Extract evaluation metrics from the confusion matrix
+accuracy_xgb_svm <- confusion_matrix_xgb_svm$overall["Accuracy"]
+precision_xgb_svm <- confusion_matrix_xgb_svm$byClass["Precision"]
+recall_xgb_svm <- confusion_matrix_xgb_svm$byClass["Recall"]
+f1_xgb_svm <- 2 * ((precision_xgb_svm * recall_xgb_svm) / (precision_xgb_svm + recall_xgb_svm))
+roc_curve_xgb_svm <- roc(test_data$DEATH_EVENT, xgb_predictions_class_svm_num)
+auc_xgb_svm <- auc(roc_curve_xgb_svm)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# train_data$DEATH_EVENT <- as.factor(ifelse(train_data$DEATH_EVENT == 1, "Yes", "No"))
+test_data$DEATH_EVENT <- as.factor(ifelse(test_data$DEATH_EVENT == 1, "Yes", "No"))
+
+# Boosting SVM Model with K-Fold CV
+train_control_boosting_cv_svm <- trainControl(method = "cv", 
+                                               number = 10,  
+                                               classProbs = TRUE, 
+                                               summaryFunction = twoClassSummary, 
+                                               verboseIter = F)  
+
+# Define the tuning grid for the hyperparameters
+
+# Used a tuning grid to come up with the values below but it was taking too 
+# long to run so I just used the best tune values
+tune_grid_svm <- expand.grid(
+  nrounds = 100,     
+  eta = 0.1,    
+  max_depth = 6,  
+  gamma = 0.1,  
+  colsample_bytree = 0.8, 
+  min_child_weight = 1,    
+  subsample = 0.8 
+)
+
+# Train the XGBoost model using the best parameters 
+xgb_model_cv_svm <- train(DEATH_EVENT ~ ., data = train_data, 
+                          method = "xgbTree", 
+                          trControl = train_control_boosting_cv_svm,
+                          tuneGrid = tune_grid_svm, 
+                          metric = "ROC")
+
+# Performance Metrics 
+cv_results_xgb_svm <- xgb_model_cv_svm$results
+mean_auc_xgb_svm <- mean(cv_results_xgb_svm$ROC)
+```
+
+#### SVM Model Statistics:
+
+```{r SVM-Stats, echo = F}
+# Extract sensitivity (TPR) and specificity (TNR) for each model
+sensitivity <- c(
+  confusion_matrix_svm$byClass["Sensitivity"], 
+  confusion_matrix_svm_tuned$byClass["Sensitivity"],
+  confusion_matrix_bagging_svm$byClass["Sensitivity"], 
+  confusion_matrix_xgb_svm$byClass["Sensitivity"]
+)
+
+specificity <- c(
+  confusion_matrix_svm$byClass["Specificity"], 
+  confusion_matrix_svm_tuned$byClass["Specificity"],
+  confusion_matrix_bagging_svm$byClass["Specificity"], 
+  confusion_matrix_xgb_svm$byClass["Specificity"]
+)
+
+# Combine all the metrics into a final results data frame
+final_results <- data.frame(
+  Model = c("Original SVM", 
+            "Tuned SVM", 
+            "Bagged SVM", 
+            "Boosted SVM"),
+  
+  Accuracy = c(accuracy_svm, accuracy_svm_tuned, accuracy_bagging_svm, accuracy_xgb_svm),
+  Precision = c(precision_svm, precision_svm_tuned, precision_bagging_svm, precision_xgb_svm),
+  Recall = c(recall_svm, recall_svm_tuned, recall_bagging_svm, recall_xgb_svm),
+  F1_Score = c(f1_svm, f1_svm_tuned, f1_bagging_svm, f1_xgb_svm),
+  TPR = sensitivity,  
+  TNR = specificity,  
+  Holdout_AUC = c(auc_svm, auc_svm_tuned, auc_bagging_svm, auc_xgb_svm),
+  CV_AUC = c(mean_auc_svm, mean_auc_svm_cv, mean_auc_bagging_svm, mean_auc_xgb_svm)
+)
+
+# Display the final results table 
+kable(final_results, caption = "Comparison of SVM Model Statistics", format = "markdown", digits = 3)
+```
+
+#### SVM Model Evaluation:
+
+The comparison of the four SVM models reveals notable differences in performance. The Original SVM model, with an accuracy of `r round(accuracy_svm, 3)` and a high recall of `r round(recall_svm, 3)` (indicating a strong True Positive Rate, TPR), was effective at identifying positive cases, but it had lower specificity of `r round(specificity[1], 3)`, meaning it struggled with correctly identifying negative cases. Its CV AUC of `r round(mean_auc_svm, 3)` suggests solid generalization. The Tuned SVM showed slight improvements in precision (`r round(precision_svm_tuned, 3)`), but had a slightly lower recall of `r round(recall_svm_tuned, 3)` and a CV AUC of `r round(mean_auc_svm_cv, 3)`, indicating potential overfitting during tuning. The Bagged SVM model outperformed the others with an accuracy of `r round(accuracy_bagging_svm, 3)`, high precision of `r round(precision_bagging_svm, 3)`, recall of `r round(recall_bagging_svm, 3)`, and specificity of `r round(specificity[3], 3)`, pointing to a more balanced performance across all metrics. It also had a CV AUC of `r round(mean_auc_bagging_svm, 3)`, reflecting better cross-validation performance. The Boosted SVM model achieved similar accuracy and precision (`r round(accuracy_xgb_svm, 3)` and `r round(precision_xgb_svm, 3)`) but excelled in specificity (`r round(specificity[4], 3)`), showing it was more effective at correctly identifying negative cases. With the highest CV AUC of `r round(mean_auc_xgb_svm, 3)`, it demonstrated the best generalization, making it the best-performing model overall despite a slightly lower holdout AUC of `r round(auc_xgb_svm, 3)`.
+
+***
+
+### **Part 11: Ensemble Model**
+
+In this ensemble model, three of the best-performing models — Boosted Logistic Regression (XGBoost), Tuned Random Forest, and Boosted SVM — were combined to improve predictive performance by leveraging the strengths of different algorithms. The ensemble approach averages the predicted probabilities of the positive class ("Yes") from each model and then makes the final prediction by applying a threshold of 0.5 to this average.
+
+#### Averaging Ensemble Model: 
+
+This ensemble combines the predictions of the three best-performing models, and averages them to create a final prediction. This method leverages the diverse strengths of the three models, helping to mitigate the weaknesses of any single model and improving overall prediction accuracy. 
+
+```{r EnsembleModel_Manual, include = F}
+# Best models: 
+  # Boosted Logistic (xgb_model)
+  # Tuned Random Forest (rf_model_tuned)
+  # Boosted SVM
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+# Manually extract probabilities
+# Wanted to use caretEnsemble but it wasn't taking my probability data so I 
+# worked around it
+xgb_yes_prob <- xgb_predictions[, "Yes"]
+rf_yes_prob <- holdout_predictions_rf_tuned[, "Yes"]
+svm_yes_prob <- xgb_predictions_svm[, "Yes"]
+
+#############################
+# EVALUATE WITH ORIGINAL DATA
+##############################
+
+# Manually average the probabilities for the "Yes" class from each model
+avg_probabilities <- (xgb_yes_prob + rf_yes_prob + svm_yes_prob) / 3
+
+# Make final predictions based on the averaged probabilities
+final_predictions <- ifelse(avg_probabilities > 0.5, "Yes", "No")
+
+# Convert final predictions to factor for confusion matrix
+final_predictions <- factor(final_predictions, levels = c("No", "Yes"))
+
+# Evaluate performance using confusion matrix
+confusion_matrix_manual <- confusionMatrix(final_predictions, factor(test_data$DEATH_EVENT))
+
+# Extract evaluation metrics from confusion matrix
+accuracy_manual <- confusion_matrix_manual$overall["Accuracy"]
+precision_manual <- confusion_matrix_manual$byClass["Precision"]
+recall_manual <- confusion_matrix_manual$byClass["Recall"]
+tpr_manual <- confusion_matrix_manual$byClass["Sensitivity"]  # TPR is same as Sensitivity
+tnr_manual <- confusion_matrix_manual$byClass["Specificity"]
+f1_manual <- 2 * ((precision_manual * recall_manual) / (precision_manual + recall_manual))
+roc_curve_manual <- roc(test_data$DEATH_EVENT, avg_probabilities)
+auc_manual <- auc(roc_curve_manual)
+
+# Make combined training set
+meta_training_data <- data.frame(
+  xgb_yes_prob,
+  rf_yes_prob,
+  svm_yes_prob,
+  DEATH_EVENT = as.factor(test_data$DEATH_EVENT)
+)
+
+# Create a 70/30 split for the data
+meta_train_index <- createDataPartition(meta_training_data$DEATH_EVENT, p = 0.7, list = FALSE)
+meta_train_data <- meta_training_data[meta_train_index, ]
+meta_test_data <- meta_training_data[-meta_train_index, ]
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Cross-validation for Averaging Model
+train_control_averaging <- trainControl(method = "cv", 
+                                         number = 10, 
+                                         classProbs = TRUE, 
+                                         summaryFunction = twoClassSummary, 
+                                         verboseIter = F)
+
+# Train Averaging Model using k-fold cross-validation
+averaging_model_cv <- train(DEATH_EVENT ~ xgb_yes_prob + rf_yes_prob + svm_yes_prob,
+                            data = meta_train_data, 
+                            method = "glmnet", 
+                            trControl = train_control_averaging,
+                            tuneLength = 10,
+                            metric = "ROC")
+
+cv_results_averaging <- averaging_model_cv$results
+mean_auc_averaging <- mean(cv_results_averaging$ROC)
+```
+
+#### Bagged Trees Ensemble Model:
+
+The Bagged Trees Model uses bagging with decision trees to combine multiple trees trained on different subsets of the data. Bagging helps reduce variance and prevent overfitting, as it averages the predictions of several decision trees, each trained on a different bootstrap sample (randomly sampled data with replacement). In this case, the model uses bagging as the meta-model to combine the predictions from the individual models (XGBoost, Random Forest, and Boosted SVM). This model is effective because bagging reduces the overfitting tendency of decision trees and improves model generalization by averaging out errors from individual models.
+
+```{r EnsembleModel_Meta, include = F}
+# Define a meta-model (Tree Bagging)
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+meta_model <- train(DEATH_EVENT ~ xgb_yes_prob + rf_yes_prob + svm_yes_prob,
+                    data = meta_train_data, 
+                    method = "treebag",  
+                    trControl = trainControl(method = "cv", number = 10, classProbs = TRUE, 
+                                             summaryFunction = twoClassSummary), 
+                    tuneLength = 10)
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make final predictions using the meta-model
+final_predictions_meta <- predict(meta_model, newdata = meta_test_data[,-4])
+
+# Convert final predictions to factor for confusion matrix
+final_predictions_meta <- factor(final_predictions_meta, levels = c("No", "Yes"))
+
+
+# Evaluate performance using confusion matrix
+confusion_matrix_meta <- confusionMatrix(final_predictions_meta, factor(meta_test_data$DEATH_EVENT))
+
+# Extract evaluation metrics from confusion matrix
+accuracy_meta <- confusion_matrix_meta$overall["Accuracy"]
+precision_meta <- confusion_matrix_meta$byClass["Precision"]
+recall_meta <- confusion_matrix_meta$byClass["Recall"]
+tpr_meta <- confusion_matrix_meta$byClass["Sensitivity"]  
+tnr_meta <- confusion_matrix_meta$byClass["Specificity"]  
+f1_meta <- 2 * ((precision_meta * recall_meta) / (precision_meta + recall_meta))
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+# Cross-validation for Meta-Model
+cv_results_meta <- meta_model$results
+mean_auc_meta <- mean(cv_results_meta$ROC)
+
+# Calculate AUC using the probabilities from the meta-model
+meta_probabilities <- predict(meta_model, newdata = meta_test_data[,-4], type = "prob")
+final_predictions <- ifelse(avg_probabilities > 0.5, "Yes", "No")
+
+roc_curve_meta <- roc(meta_test_data$DEATH_EVENT, meta_probabilities[, "Yes"])
+auc_meta <- auc(roc_curve_meta)
+
+# Combine statistics for the Averaging Model and Meta-Model
+model_stats <- data.frame(
+  Model = c("Manual Averaging Model", "Bagged Trees Meta-Model"),
+  Accuracy = c(accuracy_manual, accuracy_meta),
+  Precision = c(precision_manual, precision_meta),
+  Recall = c(recall_manual, recall_meta),
+  F1_Score = c(f1_manual, f1_meta),
+  TPR = c(tpr_manual, tpr_meta), 
+  TNR = c(tnr_manual, tnr_meta), 
+  Holdout_AUC = c(auc_manual, auc_meta),
+  CV_AUC = c(mean_auc_averaging, mean_auc_meta)  
+)
+```
+
+#### Ensemble Models Statistics:
+
+```{r EnsembleModel_Stats, echo = F}
+kable(model_stats, caption = "Comparison of Averaging Model and Meta-Model Performance", format = "markdown", digits = 3)
+```
+
+```{r EnsemblePrediction, include = F}
+# Define a new data point 
+new_data_point <- data.frame(
+  age = 65,
+  anaemia = 0,
+  creatinine_phosphokinase = 400,
+  diabetes = 1,
+  ejection_fraction = 30,
+  high_blood_pressure = 1,
+  platelets = 250000,
+  serum_creatinine = 1.2,
+  serum_sodium = 135,
+  sex = 1,
+  smoking = 0,
+  time = 10
+)
+
+# Define the normalization function
+min_max_norm_with_reference <- function(x, min_val, max_val) {
+  return((x - min_val) / (max_val - min_val))
+}
+
+# Get min and max values from the training data
+min_vals <- sapply(heart_df, min)
+max_vals <- sapply(heart_df, max)
+
+# Apply Min-Max scaling to each column of the new data point
+new_data_point_scaled <- as.data.frame(
+  Map(min_max_norm_with_reference, new_data_point, min_vals, max_vals)
+)
+
+svm_prediction <- (predict(svm_model, newdata = new_data_point_scaled, probability = TRUE))
+
+# Predict with the meta-model
+new_data_meta <- data.frame(
+  xgb_yes_prob = predict(xgb_model, newdata = new_data_point_scaled, type = "prob")[, "Yes"],
+  rf_yes_prob = predict(rf_model, newdata = new_data_point_scaled, type = "prob")[, "Yes"],
+  svm_yes_prob = svm_prediction[1]
+)
+
+# Make a prediction
+final_prediction_meta <- predict(meta_model, newdata = new_data_meta, type = "raw")
+final_prob_meta <- predict(meta_model, newdata = new_data_meta, type = "prob")
+```
+#### Making Example Prediction with Meta Ensemble Model: 
+```{r EnsembleOutput, echo = T}
+
+# Define new data point 
+new_data_point <- data.frame(
+  age = 65,
+  anaemia = 0,
+  creatinine_phosphokinase = 400,
+  diabetes = 1,
+  ejection_fraction = 30,
+  high_blood_pressure = 1,
+  platelets = 250000,
+  serum_creatinine = 1.2,
+  serum_sodium = 135,
+  sex = 1,
+  smoking = 0,
+  time = 10
+)
+
+# Display the predictions
+cat("Final Predicted Class:", final_prediction_meta, "\n")
+print(final_prob_meta)
+```
+
+#### Ensemble Models Evaluation:
+
+The Averaging Ensemble Model, which combines the predictions from XGBoost, Tuned Random Forest, and Boosted SVM, achieved an accuracy of `r round(accuracy_manual, 3)` and demonstrated a high recall of `r round(recall_manual, 3)`, indicating its strong ability to correctly identify positive cases. The model also had an impressive F1 score of `r round(f1_manual, 3)`, reflecting a balanced performance between precision and recall. The Holdout AUC for the averaging model was `r round(auc_manual, 3)`, while the CV AUC was slightly higher at `r round(mean_auc_averaging, 3)`, highlighting the model’s strong generalization. In comparison, the Bagged Trees Meta-Model, which uses bagging with decision trees to combine model predictions, showed a lower accuracy of `r round(accuracy_meta, 3)` and recall of `r round(recall_meta, 3)`. However, it had a higher precision of `r round(precision_meta, 3)` and an F1 score of `r round(f1_meta, 3)`. The Holdout AUC for the Bagged Trees Meta-Model was `r round(auc_meta, 3)` and the CV AUC was `r round(mean_auc_meta, 3)`, which demonstrated solid performance, though slightly lower than the Averaging Model. The results suggest that the Averaging Ensemble Model outperforms the Bagged Trees Meta-Model in overall accuracy and recall, while the Meta-Model shows more stability in terms of precision.
+
+### Part 12: Try Models on Different Datasets
+
+```{r CreateRandomSet, include = F}
+set.seed(123) 
+
+heart_7_df <- heart_df
+
+# Randomly remove 20% of the data for each column 
+total_rows <- nrow(heart_7_df)
+
+# For binary columns, set 20% of the values to NA
+for (colname in binary_cols) {
+
+  na_indices <- sample(1:total_rows, size = round(0.2 * total_rows), replace = FALSE)
+  heart_7_df[na_indices, colname] <- NA
+}
+
+# For continuous columns, set 20% of the values to NA
+for (colname in continuous_cols) {
+
+  na_indices <- sample(1:total_rows, size = round(0.2 * total_rows), replace = FALSE)
+  heart_7_df[na_indices, colname] <- NA
+}
+
+# Impute missing values in binary columns 
+for (colname in binary_cols) {
+
+  mode_value <- names(sort(table(heart_7_df[[colname]]), decreasing = TRUE))[1]
+  
+  # Replace NAs with the mode value
+  heart_7_df[[colname]] <- ifelse(is.na(heart_7_df[[colname]]), mode_value, heart_7_df[[colname]])
+}
+
+# Impute missing values in continuous columns 
+for (colname in continuous_cols) {
+
+  median_value <- median(heart_7_df[[colname]], na.rm = TRUE)
+  
+
+  heart_7_df[[colname]] <- ifelse(is.na(heart_7_df[[colname]]), median_value, heart_7_df[[colname]])
+}
+
+# View the first few rows of the modified dataset
+# head(heart_7_df)
+
+# Create a stratified 70/30 split based on DEATH_EVENT
+split7Index <- createDataPartition(heart_7_df$DEATH_EVENT, p = 0.7, list = FALSE)
+train_7_data <- heart_7_df[split7Index, ]
+test_7_data <- heart_7_df[-split7Index, ]
+
+# View the first few rows of the training and test sets
+# head(train_7_data)
+# head(test_7_data)
+```
+
+```{r RF_Imputed, include = F}
+# Imputed Random Forest model
+
+###############
+# DEFINE MODEL
+##############
+
+set.seed(666)
+
+train_7_data$DEATH_EVENT <- as.factor(train_7_data$DEATH_EVENT)
+rf_7_model <- randomForest(DEATH_EVENT ~ ., data = train_7_data, importance = TRUE, ntree = 500)
+
+##############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Make predictions on the test data
+holdout_7_predictions_rf <- predict(rf_7_model, newdata = test_7_data, type = "prob")
+holdout_7_predictions_prob_rf <- holdout_7_predictions_rf[, 1]
+holdout_7_predictions_class_rf <- ifelse(holdout_7_predictions_prob_rf > 0.5, 1, 0)
+
+# Factors with the same levels
+holdout_7_predictions_class_rf <- factor(holdout_7_predictions_class_rf)
+test_7_data$DEATH_EVENT <- as.factor(test_7_data$DEATH_EVENT)
+
+head(holdout_7_predictions_class_rf)
+head(test_7_data$DEATH_EVENT)
+
+# Confusion Matrix
+confusion_matrix_7_rf <- confusionMatrix(holdout_7_predictions_class_rf, test_7_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_7_rf <- confusion_matrix_7_rf$overall["Accuracy"]
+precision_7_rf <- confusion_matrix_7_rf$byClass["Precision"]
+recall_7_rf <- confusion_matrix_7_rf$byClass["Recall"]
+tpr_7_rf <- confusion_matrix_7_rf$byClass["Sensitivity"]  # TPR is same as Sensitivity
+tnr_7_rf <- confusion_matrix_7_rf$byClass["Specificity"]  # TNR is same as Specificity
+f1_7_rf <- 2 * ((precision_7_rf * recall_7_rf) / (precision_7_rf + recall_7_rf))
+roc_curve_7_rf <- roc(test_7_data$DEATH_EVENT, holdout_7_predictions_prob_rf)
+auc_7_rf <- auc(roc_curve_7_rf)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+train_7_data$DEATH_EVENT <- as.factor(ifelse(train_7_data$DEATH_EVENT == 1, "Yes", "No"))
+
+# Set up k-fold cross-validation using caret
+train_control_rf_7_cv <- trainControl(method = "cv", number = 10, 
+                                     classProbs = TRUE, summaryFunction = twoClassSummary, 
+                                     verboseIter = F)
+
+# Train the Random Forest model with k-fold cross-validation
+rf_model_7_cv <- train(DEATH_EVENT ~ ., data = train_7_data, method = "rf", 
+                     trControl = train_control_rf_7_cv, metric = "ROC", 
+                     tuneGrid = expand.grid(mtry = 1))
+
+# Print the model summary
+mean_auc_7_rf <- mean(rf_model_7_cv$results$ROC)
+```
+
+#### Random Forest Model on Original vs. Imputed Datasets:
+
+```{r RFCompStats, echo = F}
+# Create the statistics table with reversed order
+rf_comp_model_stats <- data.frame(
+  Model = c("Random Forest (Original Data)", "Random Forest (Imputed Data)"),
+  Accuracy = c(accuracy_rf, accuracy_7_rf),
+  Precision = c(precision_rf, precision_7_rf),
+  Recall = c(recall_rf, recall_7_rf),
+  F1_Score = c(f1_rf, f1_7_rf),
+  TPR = c(tpr_rf, tpr_7_rf), 
+  TNR = c(tnr_rf, tnr_7_rf),
+  AUC_Holdout = c(auc_rf, auc_7_rf),
+  AUC_CV = c(mean_auc_rf, mean_auc_7_rf)  # Assuming AUC is the same from cross-validation
+)
+
+# Print the table
+kable(rf_comp_model_stats, caption = "Comparison of Random Forest Model Performance (Original vs Imputed Data)",
+      format = "markdown", digits = 3)
+```
+
+```{r NormalizedSVM, include = F}
+# Create a stratified 70/30 split based on DEATH_EVENT
+heart_8_df <- heart_3_df
+
+split8Index <- createDataPartition(heart_8_df$DEATH_EVENT, p = 0.7, list = FALSE)
+train_8_data <- heart_8_df[split8Index, ]
+test_8_data <- heart_8_df[-split8Index, ]
+
+# View the first few rows of the training and test sets
+head(train_8_data)
+head(test_8_data)
+
+# Normalized data SVM model
+
+###############
+# DEFINE MODEL
+##############
+set.seed(666)
+
+# Train the SVM model 
+train_8_data$DEATH_EVENT <- ifelse(train_8_data$DEATH_EVENT == "Yes", 1, 0)
+svm_8_model <- svm(DEATH_EVENT ~ ., data = train_8_data, kernel = "linear", cost = 1, scale = TRUE, probability = TRUE)
+
+#############################
+# EVALUATE WITH HOLDOUT METHOD
+##############################
+
+# Predictions on the test data
+holdout_8_predictions_prob_svm <- predict(svm_model, newdata = test_8_data, type = "prob")
+holdout_8_predictions_prob_svm_yes <- ifelse(holdout_8_predictions_prob_svm > 0.5, 1, 0)
+holdout_8_predictions_svm_class <- ifelse(holdout_8_predictions_prob_svm_yes == 1, "Yes", "No")
+holdout_8_predictions_svm_class <- as.factor(holdout_8_predictions_svm_class)
+
+# Confusion Matrix
+confusion_matrix_8_svm <- confusionMatrix(holdout_8_predictions_svm_class, test_8_data$DEATH_EVENT)
+
+# Evaluation metrics
+accuracy_8_svm <- confusion_matrix_8_svm$overall["Accuracy"]
+precision_8_svm <- confusion_matrix_8_svm$byClass["Precision"]
+recall_8_svm <- confusion_matrix_8_svm$byClass["Recall"]
+f1_8_svm <- 2 * ((precision_8_svm * recall_8_svm) / (precision_8_svm + recall_8_svm))
+roc_curve_8_svm <- roc(test_8_data$DEATH_EVENT, holdout_8_predictions_prob_svm_yes)
+auc_8_svm <- auc(roc_curve_8_svm)
+
+##########################
+# EVALUATE WITH k-FOLD CV
+##########################
+
+train_8_data$DEATH_EVENT <- as.factor(ifelse(train_8_data$DEATH_EVENT == 1, "Yes", "No"))
+
+# Set up k-fold cross-validation
+train_control_svm_8_cv <- trainControl(method = "cv", 
+                                      number = 10, 
+                                      classProbs = TRUE, 
+                                      summaryFunction = twoClassSummary, 
+                                      verboseIter = F)
+
+# Train SVM model using k-fold cross-validation
+svm_model_8_cv <- train(DEATH_EVENT ~ ., 
+                      data = train_8_data, 
+                      method = "svmRadial", 
+                      trControl = train_control_svm_8_cv, 
+                      metric = "ROC",  # Evaluate using AUC
+                      tuneLength = 5)  # Tune over different values of cost
+
+cv_results_8_svm <- svm_model_8_cv$results
+mean_auc_8_svm <- mean(cv_results_8_svm$ROC)
+```
+
+#### SVM Model on Original vs. Normalized Dataset:
+
+```{r SVMCompStats, echo = F}
+# Create the statistics table for SVM models (Original vs Normalized)
+svm_comp_model_stats <- data.frame(
+  Model = c("SVM (Original Data)", "SVM (Normalized Data)"),
+  Accuracy = c(accuracy_svm, accuracy_8_svm),
+  Precision = c(precision_svm, precision_8_svm),
+  Recall = c(recall_svm, recall_8_svm),
+  F1_Score = c(f1_svm, f1_8_svm),
+  TPR = c(confusion_matrix_svm$byClass["Sensitivity"], confusion_matrix_8_svm$byClass["Sensitivity"]),
+  TNR = c(confusion_matrix_svm$byClass["Specificity"], confusion_matrix_8_svm$byClass["Specificity"]),
+  AUC_Holdout = c(auc_svm, auc_8_svm),
+  AUC_CV = c(mean_auc_svm, mean_auc_8_svm)  # Assuming AUC is the same from cross-validation
+)
+
+# Print the table
+kable(svm_comp_model_stats, caption = "Comparison of SVM Model Performance (Original vs Normalized Data)",
+      format = "markdown", digits = 3)
+```
+
+In the comparison of SVM models on original versus normalized data, the model trained on normalized data (which involved techniques like Gaussian normalization and min-max scaling) outperformed the original data model in several key performance metrics. The accuracy of the normalized SVM model was `r round(accuracy_8_svm, 3)`, a notable improvement over the original model's `r round(accuracy_svm, 3)`. Additionally, the precision increased to `r round(precision_8_svm, 3)` from `r round(precision_svm, 3)`, and the recall saw a significant boost to `r round(recall_8_svm, 3)` compared to `r round(recall_svm, 3)`. This improvement in recall indicates that the normalized data model was better at identifying positive cases. The F1 score also improved, rising to `r round(f1_8_svm, 3)` from `r round(f1_svm, 3)`, reflecting better balance between precision and recall. Furthermore, the Holdout AUC for the normalized data model was `r round(auc_8_svm, 3)`, slightly better than the original model's `r round(auc_svm, 3)`. However, the TNR (True Negative Rate) decreased from `r round(confusion_matrix_svm$byClass["Specificity"], 3)` to `r round(confusion_matrix_8_svm$byClass["Specificity"], 3)`, suggesting a trade-off where the model becomes more sensitive but less specific. These results suggest that normalization, which standardizes the features, can significantly enhance the model's ability to capture the underlying patterns in the data, particularly for SVM.
+
+When comparing Random Forest models on the original versus imputed data, the performance diverged sharply. The accuracy of the Random Forest model on the original data was `r round(accuracy_rf, 3)`, whereas on the imputed data, it dropped drastically to `r round(accuracy_7_rf, 3)`. Similarly, the precision and recall were also lower for the imputed model, indicating that imputing missing data (via median for continuous variables and mode for categorical variables) introduced significant noise, leading to poorer performance. The F1 score of `r round(f1_7_rf, 3)` for the imputed data was substantially lower than the original model’s score of `r round(f1_rf, 3)`, and the AUC dropped from `r round(auc_rf, 3)` to `r round(auc_7_rf, 3)`. 
+
+***
+
+### Part 13: Compare All Models
+
+#### Best Model for Predicting the Target Variable:
+
+After considering all of the models I developed, the Averaging Ensemble Model stands out as the best overall choice for predicting patient survival. This ensemble method effectively combines the strengths of XGBoost, Tuned Random Forest, and Boosted SVM, achieving a high balance between precision and recall, strong generalization (as evidenced by its CV AUC of `r round(mean_auc_averaging,3)`), and a robust F1 score of `r round(f1_manual,3)`. Although the individual models showed strong performance, particularly the Tuned Random Forest and Boosted SVM, the ensemble approach harnesses the complementary strengths of these models to enhance prediction stability and accuracy, making it the optimal choice for this task.
