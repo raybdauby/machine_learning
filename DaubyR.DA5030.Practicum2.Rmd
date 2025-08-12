@@ -1,0 +1,520 @@
+---
+title: "Practicum II"
+author: "Dauby, Ray"
+date: "11-06-24"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r Packages, include = F}
+library(caret)
+library(e1071)
+library(dplyr)
+library(ggplot2)
+library(C50)
+```
+
+## Problem 1: Classification with Naive Bayes, Decision Trees, and Logistic Regression
+
+### Question 1: Load Data
+
+```{r DownloadData, echo = T}
+# File path of each provided data file
+adult_data_path <- "adult/adult.data"
+adult_test_path <- "adult/adult.test"
+adult_names_path <- "adult/adult.names"
+
+# Load the data
+adult.data <- read.csv(adult_data_path, sep = ",", header = F, stringsAsFactors = T)
+adult.test <- read.csv(adult_test_path, sep = ",", header = F, stringsAsFactors = T)
+adult.names <- read.csv(adult_names_path, sep = ",", header = F, stringsAsFactors = T)
+```
+
+### Question 2: Combine Data
+
+```{r LoadData, echo = T}
+# List of column names
+column_names <- c('age', 'workclass', 'fnlwgt', 'education', 'education_num', 'marital_status',
+                  'occupation', 'relationship', 'race', 'sex', 'capital_gain', 'capital_loss',
+                  'hours_per_week', 'native_country', 'income')
+
+# Merge dfs vertically
+combined_df <- rbind(adult.data, adult.test)
+
+# Assign column names
+colnames(combined_df) <- column_names
+
+# Format income column
+combined_df$income <- gsub("\\.", "", combined_df$income)
+combined_df <- combined_df[combined_df$income != "", ]
+combined_df$income <- factor(combined_df$income)
+combined_df <- na.omit(combined_df)
+
+table(combined_df$income)
+
+# Show required rows and columns
+head(combined_df[c(11, 112, 199, 203), 1:4])
+```
+
+### Question 3: Split Data
+
+```{r SplitData, echo = T}
+# Set the seed for reproducibility
+set.seed(33452)
+
+# Split the data into 75% training and 25% validation
+partition <- createDataPartition(combined_df$income, p = 0.75, list = FALSE)
+```
+
+### Question 4: Naive Bayes Model
+
+```{r NaiveBayes, echo = T}
+# Subset df and remove rows with NAs
+subset_combined_df <- na.omit(combined_df[, c("age", "workclass", "education_num", "race", "sex", 
+                                              "hours_per_week", "native_country", "income")])
+
+# Remove rows with any empty strings in any factor columns
+subset_combined_df <- subset_combined_df[!apply(subset_combined_df == "", 1, any), ]
+subset_combined_df <- droplevels(subset_combined_df)
+
+# Binning function (using fixed bin breaks)
+# Asked ChatGPT for help standardizing the bin size
+binning_function <- function(x, bin_edges) {
+  cut(x, breaks = bin_edges, include.lowest = TRUE, labels = FALSE)
+}
+
+# Number of bins =~ sqrt(nrow(subset_combined_df))
+num_bins <- 200
+
+# Calculate bin edges for 3 continuous variables
+age_breaks <- seq(min(subset_combined_df$age, na.rm = TRUE), max(subset_combined_df$age, na.rm = TRUE), 
+                  length.out = num_bins + 1)
+
+education_num_breaks <- seq(min(subset_combined_df$education_num, na.rm = TRUE), 
+                            max(subset_combined_df$education_num, na.rm = TRUE), 
+                            length.out = num_bins + 1)
+
+hours_per_week_breaks <- seq(min(subset_combined_df$hours_per_week, na.rm = TRUE), 
+                             max(subset_combined_df$hours_per_week, na.rm = TRUE), 
+                             length.out = num_bins + 1)
+
+# Apply the binning to the entire dataset
+subset_combined_df$age <- binning_function(as.numeric(subset_combined_df$age), age_breaks)
+subset_combined_df$education_num <- binning_function(as.numeric(subset_combined_df$education_num), 
+                                                     education_num_breaks)
+subset_combined_df$hours_per_week <- binning_function(as.numeric(subset_combined_df$hours_per_week), 
+                                                      hours_per_week_breaks)
+
+# Create the training set (75%) & validation set (25%)
+train_data <- subset_combined_df[partition, ]
+validation_data <- subset_combined_df[-partition, ]
+
+# Train Naive Bayes model
+nb_model <- naiveBayes(income ~ age + workclass + education_num + race + sex + hours_per_week + 
+                         native_country, data = train_data)
+```
+
+### Question 5: Naive Bayes Confusion Matrix
+
+```{r NaiveBayesMatrix, echo = T}
+# Make Predictions on validation data
+predictions <- predict(nb_model, validation_data)
+
+# Confusion matrix
+bayes_matrix <- confusionMatrix(predictions, validation_data$income)
+print(bayes_matrix)
+```
+
+The Naive Bayes model is performing quite well in terms of sensitivity (TPR = `r round(100*bayes_matrix$byClass['Sensitivity'],2)`%), meaning it is highly effective at identifying the <=50K class. However, it struggles with specificity (TNR = `r round(100* bayes_matrix$byClass['Specificity'], 2)`%), meaning it has difficulty correctly identifying the minority class. The high prevalence of the <=50K class (`r round(100*bayes_matrix$byClass['Prevalence'], 2)`%) likely contributes to the model's bias towards predicting this class. While the model does a good job of predicting <=50K (with a high PPV of `r round(100* bayes_matrix$byClass['Pos Pred Value'], 2)`%), the model still misclassifies a non-negligible number of >50K instances as <=50K, contributing to the low specificity.
+
+### Question 6: Naive Bayes Model Statistics
+
+```{r NaiveBayesStats, echo = T}
+# Extract confusion matrix values
+bm <- bayes_matrix$table
+TP <- bm[2, 2]  
+FP <- bm[1, 2]  
+TN <- bm[1, 1]  
+FN <- bm[2, 1]  
+
+# Manually Ccalculate accuracy
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+# Manually calculate precision
+precision <- TP / (TP + FP)
+
+# Print the metrics
+cat("Overall Accuracy: ", accuracy, "\n")
+cat("Precision: ", precision, "\n")
+```
+
+### Question 7: Logistic Model
+
+```{r LogisticModel, echo = T}
+# Fit the logistic regression model 
+logistic_model <- glm(income ~ age + workclass + education_num + race + sex + hours_per_week + 
+                        native_country,
+                      data = train_data, 
+                      family = binomial)
+
+# Print the summary
+summary(logistic_model)
+```
+
+### Question 8: Logistic Model Confusion Matrix
+
+```{r LogisticMatrix, echo = T}
+# Make predictions on the validation_data
+predictions <- predict(logistic_model, validation_data, type = "response")
+
+# Convert predictions to binary outcome
+predicted_class <- ifelse(predictions > 0.5, " >50K", " <=50K")
+predicted_class <- factor(predicted_class, levels = levels(validation_data$income))
+
+# Create confusion matrix
+log_matrix <- confusionMatrix(predicted_class, validation_data$income)
+print(log_matrix)
+```
+
+The logistic regression model has high sensitivity (TPR = `r round(100*log_matrix$byClass['Sensitivity'], 2)`%) and relatively low specificity (TNR = `r round(100*log_matrix$byClass['Specificity'] ,2)`%), meaning it has trouble correctly identifying the >50K class. The model's performance is again affected by the class imbalance — this is likely why the model tends to predict the majority class more often. The model achieves a good positive predictive value (PPV = `r round(100*log_matrix$byClass['Pos Pred Value'],2)`%) for predicting <=50K, but the negative predictive value for >50K (NPV = `r round(100*log_matrix$byClass['Neg Pred Value'],2)`%) is lower. The relatively low balanced accuracy (`r round(100*log_matrix$byClass['Balanced Accuracy'],2)`%) shows that while the model performs well for the dominant <=50K class, it is less effective at predicting the minority class (>50K).
+
+The Kappa value for the logistic regression model (`r log_matrix$overall['Kappa']`) is slightly lower than the C5.0 model’s Kappa (`r bayes_matrix$overall['Kappa']`), suggesting slightly worse agreement between the predicted and actual classes, though both models have moderate agreement.
+
+### Question 9: Decision Tree Model
+
+```{r DecisionTree, echo = T}
+# Train the C5.0 model excluding the specified columns from the training data
+dt_model <- C5.0(income ~ age+workclass+education_num+race+sex+hours_per_week+native_country, 
+                 data = train_data, rules=F)
+
+# Print the summary of the model to see the tree structure
+summary(dt_model)
+```
+
+### Question 10: Decision Tree Confusion Matrix
+
+```{r DecisionTreeMatrix, echo = T}
+# Make predictions on the validation data
+tree_predictions <- predict(dt_model, validation_data[,-8])
+
+# Confusion matrix
+tree_matrix <- confusionMatrix(tree_predictions, validation_data$income)
+print(tree_matrix)
+```
+
+The decision tree model has an accuracy of `r round(100*tree_matrix$overall['Accuracy'],2)`%, with high sensitivity (TPR = `r round(100*tree_matrix$byClass['Sensitivity'], 2)`%), but low specificity (TNR = `r round(100*tree_matrix$byClass['Specificity'] ,2)`%) , indicating that it again struggles to identify the minority class. The positive predictive value is high (PPV = `r round(100*tree_matrix$byClass['Pos Pred Value'],2)`%), but the negative predictive value (NPV = `r round(100*tree_matrix$byClass['Neg Pred Value'],2)`%) is lower, reflecting the model's bias towards predicting the majority class. With a Kappa of `r tree_matrix$overall['Kappa']` and balanced accuracy (`r round(100*tree_matrix$overall['Balanced Accuracy'],2)`%), the model's performance is good for <=50K but less effective for >50K, likely due to class imbalance in the dataset. This suggests the model is biased toward the majority class and would benefit from adjustments for handling imbalanced data.
+
+The decision tree model has the highest Kappa value thus far (`r tree_matrix$overall['Kappa']`), indicating the best agreement between predicted and actual classes of our three models. 
+
+### Question 11: Ensemble Model
+
+```{r EnsembleModel, echo = T}
+# Function to predict earnings class using an ensemble
+predictEarningsClass <- function(train_data, validation_data, nb_model, logistic_model, dt_model) {
+  
+  # Make predictions for each model
+  
+  # Naive Bayes
+  nb_predictions <- predict(nb_model, validation_data)
+  
+  # Logistic Regression
+  logistic_predictions <- predict(logistic_model, validation_data, type = "response")
+  logistic_predictions <- ifelse(logistic_predictions > 0.5, " >50K", " <=50K")
+  logistic_predictions <- factor(logistic_predictions, levels = levels(validation_data$income))
+  
+  # Decision Tree
+  dt_predictions <- predict(dt_model, validation_data[,-8])
+  
+  # Combine predictions using majority vote
+  combined_predictions <- data.frame(
+    nb = nb_predictions,
+    logistic = logistic_predictions,
+    dt = dt_predictions
+  )
+  
+  # Determine final prediction
+  # Asked ChatGPT to help format my function here
+  final_predictions <- apply(combined_predictions, 1, function(x) {
+    vote_count <- table(x)
+    # Class with highest count
+    return(names(vote_count)[which.max(vote_count)])
+  })
+  
+  # Convert final prediction to factor
+  final_predictions <- factor(final_predictions, levels = levels(validation_data$income))
+  return(final_predictions)
+}
+```
+
+### Question 12: Ensemble Model Prediction
+
+```{r PredictPoint, echo = T}
+# Create new data point 
+new_data <- data.frame(
+  age = 35,
+  workclass = factor("Private", levels = levels(subset_combined_df$workclass)),
+  education_num = 7,
+  race = factor("Black", levels = levels(subset_combined_df$race)),
+  sex = factor("Male", levels = levels(subset_combined_df$sex)),
+  hours_per_week = 40, 
+  native_country = factor("Brazil", levels = levels(subset_combined_df$native_country)),
+  income = factor(" <=50K", levels = levels(subset_combined_df$income))  # Placeholder
+)
+
+# Apply binning to continuous variables (age, education_num, hours_per_week)
+new_data$age <- binning_function(as.numeric(new_data$age), age_breaks)
+new_data$education_num <- binning_function(as.numeric(new_data$education_num), education_num_breaks)
+new_data$hours_per_week <- binning_function(as.numeric(new_data$hours_per_week), hours_per_week_breaks)
+
+# Predict using the ensemble model
+final_prediction <- predictEarningsClass(train_data, new_data, nb_model, logistic_model, dt_model)
+print(final_prediction)
+```
+
+### BONUS: Question 13: Calculate F1 Scores
+
+```{r F1.Scores, echo = T}
+
+```
+
+## Problem 2: Multiple Regression
+
+### Question 1: Load Data
+
+```{r LoadSalesData, echo = T}
+# Load Data
+sales_path <- "HomeSalesUFFIData.csv"
+sales.df <- read.csv(sales_path, sep = ",", header = T, stringsAsFactors = T)
+
+# Pre-process SalesPrice data
+sales.df$SalesPrice <- as.numeric(gsub("[\\$,]", "", as.character(sales.df$SalesPrice)))
+```
+
+### Question 2: Identify Outliers
+
+```{r IdentifyOutliers, echo = T}
+# Function to remove outliers based on Z-score and count outliers in each column
+# Used a similar function to what I used in a past assignment
+remove_outliers_zscore <- function(df, threshold = 3) {
+  
+  # Create empty data frame 
+  df_no_outliers <- df
+  
+  # Loop through each numeric column
+  outlier_count <- list()  
+  for (colname in colnames(df)) {
+    if (is.numeric(df[[colname]])) {
+      
+      # Calculate Z-scores for column
+      mean_col <- mean(df[[colname]], na.rm = TRUE)
+      sd_col <- sd(df[[colname]], na.rm = TRUE)
+      z_scores <- (df[[colname]] - mean_col) / sd_col
+      
+      # Identify outliers
+      outliers <- abs(z_scores) > threshold
+      outlier_count[[colname]] <- sum(outliers, na.rm = TRUE)
+      
+      # Remove rows where the Z-score is greater than threshold
+      df_no_outliers <- df_no_outliers[!outliers, ]
+    }
+  }
+  
+  # Print the number of outliers for each column
+  cat("# of outliers:\n")
+  for (colname in names(outlier_count)) {
+    cat(colname, ": ", outlier_count[[colname]], "\n")
+  }
+  return(df_no_outliers)
+}
+
+# Dataset without outliers
+sales.no.df <- remove_outliers_zscore(sales.df)
+```
+
+There are outliers in the SalesPrice, LivingAreaSqFt, and HasPool feature columns. I used z-scoring to identify and remove outliers, where values more than 3 Standard Deviations away from the mean were removed. 
+
+### Question 3: Test Feature Normality 
+
+```{r TestNormality, echo = T}
+# Set seed for reproducibility
+set.seed(123)
+
+# Function to test normality
+test_normality <- function(df) {
+
+  non_normal_columns <- c()
+  continuous_numeric_cols <- c("Finished.Bsmnt", "LotSizeSqFt", "LivingAreaSqFt")
+  
+  # Loop through each column
+  for (colname in continuous_numeric_cols) {
+      
+    # Shapiro-Wilk test
+    shapiro_result <- shapiro.test(df[[colname]])
+    
+    # If p-value < 0.05, column not normally distributed
+    if (shapiro_result$p.value < 0.05) {
+      non_normal_columns <- c(non_normal_columns, colname)
+    }
+  }
+  return(non_normal_columns)
+}
+
+# Run the function
+non_normal_columns <- test_normality(sales.no.df)
+print(non_normal_columns)
+```
+
+### Question 4: Normalize Features
+
+```{r NormalizeFeatures, echo = T}
+# Transform to approximately normal distributions
+
+# Histogram of log(Finished.Bsmnt)
+ggplot(sales.no.df, aes(x = log(Finished.Bsmnt))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of log(Finished.Bsmnt)")
+
+# Histogram of sqrt(LotSizeSqFt)
+ggplot(sales.no.df, aes(x = sqrt(LotSizeSqFt))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of sqrt(LotSizeSqFt)")
+
+# Histogram of log(LivingAreaSqFt)
+ggplot(sales.no.df, aes(x = log(LivingAreaSqFt))) +
+  geom_histogram(bins = 40, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of log(LivingAreaSqFt)")
+
+# Update data to reflect transformations
+sales.tx <- sales.no.df %>%
+  mutate(
+    Finished.Bsmnt = log(Finished.Bsmnt +1),
+    LotSizeSqFt = sqrt(LotSizeSqFt),
+    LivingAreaSqFt = log(LivingAreaSqFt +1)
+  )
+
+# Remove any NAs produced by normalization
+sales.tx <- na.omit(sales.tx)
+```
+
+### Question 5: Variable Correlations 
+
+```{r VariableCorrelations, echo = T}
+# Calculate correlations for all numeric variables
+cor(sales.tx[sapply(sales.tx, is.numeric)], use = "complete.obs")
+```
+
+The correlations of each feature to the target variable can be found in the target variable column (SalesPrice) of the correlation matrix above. The only feature that exhibits a correlation above 0.6 is YearSold. 
+
+### Question 6: Partition 3 Datasets
+
+```{r PartitionData, echo = T}
+# Clean the data 
+sales.df <- na.omit(sales.df)
+sales.no.df <- na.omit(sales.no.df)
+
+# Partition sales.no.df, sales.df, and sales.tx
+sales.indices <- createDataPartition(sales.df$SalesPrice, p = 0.85, list = FALSE)
+sales.no.indices <- createDataPartition(sales.no.df$SalesPrice, p = 0.85, list = FALSE)
+sales.tx.indices <- createDataPartition(sales.tx$SalesPrice, p = 0.85, list = FALSE)
+
+# Subset the data into training and testing sets
+sales.training <- sales.df[sales.indices, ]
+sales.testing <- sales.df[-sales.indices, ]
+
+sales.no.training <- sales.no.df[sales.no.indices, ]
+sales.no.testing <- sales.no.df[-sales.no.indices, ]
+
+sales.tx.training <- sales.tx[sales.tx.indices, ]
+sales.tx.testing <- sales.tx[-sales.tx.indices, ]
+```
+
+### Question 7: Multiple Regression Models
+
+```{r MultipleRegressionModels, echo = T}
+# Original Full Dataset
+# Removed Features: Gt45YrOld, Observation, Finished.Bsmnt, UFFI.Present, HasAC
+sales.df.model <- lm(SalesPrice ~ YearSold+HasBrickExt+LotSizeSqFt+NumEncParkSpaces+
+                       LivingAreaSqFt+HasPool, data = sales.training)
+summary.df.model <- summary(sales.df.model)
+
+# Outliers Removed Dataset
+# Removed Features:  Observation, Gt45YrOld, LotSizeSqFt, HasAC, HasBrickExt, UFFI.Present, HasPool
+sales.no.model <- lm(SalesPrice ~ YearSold+Finished.Bsmnt+NumEncParkSpaces+
+                       LivingAreaSqFt, data = sales.no.training)
+summary.no.model <- summary(sales.no.model)
+
+# Normalized and Outliers Removed dataset
+# Removed Features: HasAC, Gt45YrOld, Observation, LotSizeSqFt, HasBrickExt, UFFI.Present 
+sales.tx.model <- lm(SalesPrice ~ YearSold+Finished.Bsmnt+NumEncParkSpaces+
+                       LivingAreaSqFt+HasPool, data = sales.tx.training)
+summary.tx.model <- summary(sales.tx.model)
+```
+
+### Question 8: Analyze Models
+
+```{r AnalyzeModels, echo = T}
+# Extract Residual Standard Error (RSE)
+RSE.df.model <- summary.df.model$sigma
+RSE.no.model <- summary.no.model$sigma
+RSE.tx.model <- summary.tx.model$sigma
+
+# Extract Adjusted R-squared (ARS)
+ARS.df.model <- summary.df.model$adj.r.squared
+ARS.no.model <- summary.no.model$adj.r.squared
+ARS.tx.model <- summary.tx.model$adj.r.squared
+
+# Predict on testing data
+pred.df.model <- predict(sales.df.model, newdata = sales.testing)
+pred.no.model <- predict(sales.no.model, newdata = sales.no.testing)
+pred.tx.model <- predict(sales.tx.model, newdata = sales.tx.testing)
+
+# Calculate RMSE for each model
+RMSE.df.model <- sqrt(mean((pred.df.model - sales.testing$SalesPrice)^2))
+RMSE.no.model <- sqrt(mean((pred.no.model - sales.no.testing$SalesPrice)^2))
+RMSE.tx.model <- sqrt(mean((pred.tx.model - sales.tx.testing$SalesPrice)^2))
+
+# Output Adjusted R-Squared and RMSE
+cat("Adjusted R-Squared for sales.df.model:", ARS.df.model, "\n")
+cat("Adjusted R-Squared for sales.no.model:", ARS.no.model, "\n")
+cat("Adjusted R-Squared for sales.tx.model:", ARS.tx.model, "\n")
+
+cat("RMSE for sales.df.model:", RMSE.df.model, "\n")
+cat("RMSE for sales.no.model:", RMSE.no.model, "\n")
+cat("RMSE for sales.tx.model:", RMSE.tx.model, "\n")
+```
+
+Based on the RMSE alone, sales.no.model (outliers removed) seems to perform the best as it has by far the lowest RMSE (`r round(RMSE.no.model, 3)`). However, it also has the lowest Adjusted R-Squared, which suggests that it may not explain as much variance in the data as the other models. This indicates a trade-off between predictive accuracy (RMSE) and explanatory power (ARS).
+If the goal is to maximize the amount of variance explained by the model and understand the relationships between various predictors and SalesPrice, the Outliers-Removed and Features-Normalized Dataset with an Adjusted R-Squared of `r round(ARS.tx.model,3)` is the best. It explains the most variance in the target variable, though at the cost of increased residual error.
+
+### BONUS: Question 9: Confidence Intervals
+
+```{r ConfidenceIntervals, echo = T}
+# Prediction intervals for the original model (sales.df.model)
+pred_df_with_intervals <- predict(sales.df.model, newdata = sales.testing, interval = "prediction", 
+                                  level = 0.95)
+
+# Prediction intervals for the outliers removed model (sales.no.model)
+pred_no_with_intervals <- predict(sales.no.model, newdata = sales.no.testing, interval = "prediction", 
+                                  level = 0.95)
+
+# Prediction intervals for the normalized model (sales.tx.model)
+pred_tx_with_intervals <- predict(sales.tx.model, newdata = sales.tx.testing, interval = "prediction", 
+                                  level = 0.95)
+
+# Combine the predictions with intervals into dataframes for easier review
+pred_df_intervals <- as.data.frame(pred_df_with_intervals)
+pred_no_intervals <- as.data.frame(pred_no_with_intervals)
+pred_tx_intervals <- as.data.frame(pred_tx_with_intervals)
+
+# Add column names for clarity
+colnames(pred_df_intervals) <- c("Prediction", "Lower_95", "Upper_95")
+colnames(pred_no_intervals) <- c("Prediction", "Lower_95", "Upper_95")
+colnames(pred_tx_intervals) <- c("Prediction", "Lower_95", "Upper_95")
+
+# View the first few rows of the prediction intervals for each model
+head(pred_df_intervals)
+head(pred_no_intervals)
+head(pred_tx_intervals)
+```
+
