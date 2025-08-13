@@ -1,10 +1,10 @@
-**Author:** *Ray Dauby*  
+**Author:** Ray Dauby 
 **Date:** Fall 2024 
 
 ## Overview
 
 This repository contains coursework, practicums, and a final project completed as part of **DA.5030 – Introduction to Machine Learning & Data Mining**.  
-The course introduced fundamental techniques in **data preprocessing, machine learning, and predictive modeling** with a focus on practical implementation in **R**.
+The course covered fundamental techniques in data preprocessing, machine learning, and predictive modeling with a focus on practical implementation in **R**.
 
 The work here demonstrates my understanding of:
 
@@ -15,8 +15,15 @@ The work here demonstrates my understanding of:
 
 ## Content: 
 
-- FinalProject: Contains content from my final project, in which I analyzed a clinical dataset using three ML Algorithms. 
-- Practicums: Small projects to demonstrate my learning in the course.
-- Algorithms: My R Notebooks that demonstrate my understanding of ML algorithms and DM skills.
-
-https://rpubs.com/raybdauby/knn-r-notebook
+- FinalProject: Contains content from my final project, in which I analyzed a clinical dataset using three ML Algorithms. <br>
+> R Notebook: https://rpubs.com/raybdauby/heartfailure-r-notebook<br>
+- Practicums: Small projects to demonstrate my learning in the course. <br>
+> PDF analysis and algorithms can be found in the practicums folder <br>      
+- Algorithms: My R Notebooks that demonstrate my understanding of ML algorithms and DM skills. <br>
+> kNN R Notebook: https://rpubs.com/raybdauby/knn-r-notebook <br>
+      Regression R Notebook: https://rpubs.com/raybdauby/regression-r-notebook <br>
+      Naive Bayes R Notebook: https://rpubs.com/raybdauby/naivebayes-r-notebook <br>
+      Logistic Regression R Notebook: https://rpubs.com/raybdauby/logregression-r-notebook <br>
+      Forecasting R Notebook: https://rpubs.com/raybdauby/forecasting-r-notebook <br>
+      Decision Trees R Notebook: https://rpubs.com/raybdauby/decisiontrees-r-notebook
+      
