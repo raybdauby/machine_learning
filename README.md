@@ -1,6 +1,5 @@
 **Author:** *Ray Dauby*  
-**Institution:** Northeastern University  
-**Course:** DA.5030 – Introduction to Machine Learning & Data Mining  
+**Institution:** Northeastern University   
 
 ## Overview
 
