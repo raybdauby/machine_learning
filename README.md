@@ -15,6 +15,6 @@ The work here demonstrates my understanding of:
 
 ## Content: 
 
-FinalProject: Contains content from my final project, in which I analyzed a clinical dataset using three ML Algorithms. 
-Practicums: Small projects to demonstrate my learning in the course.
-Algorithms: My R Notebooks that demonstrate my understanding of ML algorithms and DM skills. 
+- FinalProject: Contains content from my final project, in which I analyzed a clinical dataset using three ML Algorithms. 
+- Practicums: Small projects to demonstrate my learning in the course.
+- Algorithms: My R Notebooks that demonstrate my understanding of ML algorithms and DM skills. 
